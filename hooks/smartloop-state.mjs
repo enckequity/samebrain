@@ -21,6 +21,16 @@ export function readRuns(dir = stateDir()) {
       if (kv) fm[kv[1]] = kv[2].trim();
     }
     fm.slug = slug; // directory name is authoritative — frontmatter cannot spoof it
+    // Journal size = rehydrate-cost proxy for portfolio ordering. Computed, not parsed —
+    // frontmatter cannot spoof it either.
+    fm.journal_lines = 0;
+    const ji = text.indexOf('\n## Journal');
+    if (ji !== -1) {
+      const rest = text.slice(ji + '\n## Journal'.length);
+      const next = rest.indexOf('\n## ');
+      const body = next === -1 ? rest : rest.slice(0, next);
+      fm.journal_lines = body.split(/\r?\n/).filter((l) => l.trim()).length;
+    }
     runs.push(fm);
   }
   return runs;
