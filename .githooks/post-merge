@@ -1,4 +1,7 @@
 #!/bin/sh
 # Auto-render after `git pull` so canonical config changes land immediately.
 # Opt-in, once per clone:  git config core.hooksPath .githooks
+# Non-login shells (SSH, IDE git clients) may lack the node dir in PATH — add common locations.
+PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+command -v node >/dev/null 2>&1 || { echo "post-merge: node not found; run bin/render.mjs manually" >&2; exit 0; }
 node "$(git rev-parse --show-toplevel)/bin/render.mjs"
