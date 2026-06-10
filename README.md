@@ -4,9 +4,52 @@
 
 **One brain for every AI coding agent — Claude Code, Codex, Cursor — on every machine.**
 
-If you run more than one AI coding agent, you know the drift: each agent has its own global rules, its own MCP config, its own (lack of) memory. Fix something in Claude Code, and Codex never hears about it. Teach an agent an infra gotcha on your desktop, and the same agent on your laptop relearns it the hard way. Two agents pick up the same task and collide in one checkout.
+Teach Claude Code something, and Codex never hears about it. Your laptop's agents don't know what your desktop's agents learned this morning. Every agent keeps its own rules, its own tool config, its own amnesia.
 
-samebrain makes one git repo the single source of truth for all of it:
+samebrain fixes that with one git repo:
+
+- 📋 **One set of rules** — written once, rendered to every agent's native format
+- 🧠 **One shared memory** — every agent reads it when a session starts, saves to it when it ends, and git syncs it between your machines
+- 🔌 **One tool (MCP) config** — with secrets kept out of the repo
+
+No servers. No API costs. Nothing to install beyond [Node.js](https://nodejs.org) and [git](https://git-scm.com). ~300 lines of code you can read in ten minutes.
+
+## Setup — 3 steps, about 2 minutes
+
+**1.** Click the green **Use this template** button at the top of this page → create the repo as **Private** (your rules and memory are yours).
+
+**2.** Clone your new repo (swap in your username and repo name):
+
+```bash
+git clone https://github.com/YOURNAME/YOURREPO ~/samebrain
+```
+
+**3.** Run setup:
+
+```bash
+cd ~/samebrain
+node bin/setup.mjs
+```
+
+That's it. Every AI coding agent on this computer now shares the same rules, tools, and memory.
+
+**Another computer?** Repeat steps 2–3 there. Git keeps them in sync.
+
+## Make it yours
+
+Edit these files, then run `node bin/render.mjs` to apply:
+
+| File | What it is |
+|---|---|
+| `global/guardrails.md` | Your rules for every agent, in plain English |
+| `global/coordination.md` | How multiple agents avoid stepping on each other |
+| `global/mcp.json` | The MCP servers (tools) your agents can use |
+| `global/addenda/*.md` | Extra instructions, one topic per file |
+| `memory/MEMORY.md` | Shared memory — your agents maintain this themselves |
+
+Always edit these files — never the rendered copies (those carry a "generated" marker and get overwritten).
+
+## How it works
 
 ```
 global/guardrails.md  ─┐
@@ -20,23 +63,10 @@ memory/MEMORY.md  ◄── every agent reads at session start (hooks) and appen
 memory/topics/*.md     git syncs it across machines (recall pulls, sync pushes)
 ```
 
-No daemon. No vector database. No LLM API calls. No dependencies beyond `node` and `git`. ~300 lines of code you can read in ten minutes.
+Everything below is detail — click to expand.
 
-## Quickstart
-
-1. Click **Use this template** → create a **private** repo (your config and memory are yours).
-2. Clone and render:
-
-```bash
-gh repo clone <you>/<your-repo> ~/samebrain
-cd ~/samebrain && node bin/render.mjs
-```
-
-3. Edit `global/*.md` to taste, add your MCP servers to `global/mcp.json`, re-run `node bin/render.mjs`. Done — every agent on this machine now shares the same rules, tools, and memory.
-
-On every other machine: clone the same repo, run the same command.
-
-## What gets synced
+<details>
+<summary><strong>What gets synced, per agent</strong></summary>
 
 | Surface | Claude Code | Codex | Cursor |
 |---|---|---|---|
@@ -55,9 +85,12 @@ Also covered, automatically detected (rendered only if the agent's directory exi
 
 Gemini/Copilot don't get memory hooks yet — their rendered instructions carry a memory-bootstrap line telling the agent to read the shared index at session start.
 
-**Rendered files carry a marker comment** — edit the canonical files in `global/`, never the rendered ones. `node bin/render.mjs --check` reports drift without writing. First render backs up anything it replaces to `backups/` (gitignored).
+`node bin/render.mjs --check` reports drift without writing anything. The first render backs up anything it replaces to `backups/` (gitignored).
 
-## Shared memory: git, not a memory server
+</details>
+
+<details>
+<summary><strong>Shared memory: why git instead of a memory server</strong></summary>
 
 Every session of every agent starts with the contents of `memory/MEMORY.md` injected into context (after a fast, fail-silent `git pull`). The instructions rendered into every agent tell it to append durable facts — one line in the index, detail in `memory/topics/*.md`. At session end, a hook commits and pushes. Offline? Both hooks fail silently and reconcile on the next pull.
 
@@ -68,9 +101,12 @@ Why this beats an MCP memory server:
 - **Zero infrastructure.** No embedding API, no vector store, no daemon eating RAM. Git is the sync protocol, the history, and the backup.
 - **You own it.** Plain markdown, versioned, greppable, editable, portable.
 
-Discipline: one line per fact, cap the index at ~120 lines, prune stale facts. The index is a per-session token tax — keep it cheap.
+Discipline: one line per fact, cap the index at ~120 lines, prune stale facts. The index is a per-session token tax — keep it cheap. (The recall hook warns the agent automatically when the index goes over the cap.)
 
-## Secrets
+</details>
+
+<details>
+<summary><strong>Secrets</strong></summary>
 
 String values in `global/mcp.json` support two reference forms, resolved at render time:
 
@@ -79,17 +115,26 @@ String values in `global/mcp.json` support two reference forms, resolved at rend
 
 Rendered agent configs get literal values (agents can't expand references); the repo never holds a raw secret — even private forks shouldn't. Unresolvable references fail the render loudly, naming the variable. `secrets.env` exists for machines without a secret-manager CLI: rendered configs already hold resolved values locally, so a local env file adds no new exposure class — copy it once per machine and keep the canonical copy in your secret manager.
 
-## Multi-agent coordination
+</details>
+
+<details>
+<summary><strong>Multi-agent coordination</strong></summary>
 
 `global/coordination.md` renders into every agent's instructions, so all of them follow one protocol: claim a GitHub issue (label `agent:claude` / `agent:codex` / `agent:cursor`) before non-trivial work, always work in a dedicated `git worktree`, branch under your namespace (`claude/*`, `codex/*`, `cursor/*`), integrate via PR only. The PR queue serializes conflicts; `git reflog` recovers from branch flips.
 
-## Cost: zero, by design
+</details>
+
+<details>
+<summary><strong>Cost: zero, by design</strong></summary>
 
 - **No LLM API calls anywhere.** Rendering is deterministic string assembly; memory is file injection. Your agents run entirely on the subscriptions you already pay for (Claude, ChatGPT/Codex, Cursor).
 - **Token-frugal.** Hooks instead of MCP tools; a capped memory index instead of schema bloat; one set of instructions instead of three drifting copies.
 - **No services.** Nothing to host, nothing metered, nothing that bills.
 
-## Updating the engine
+</details>
+
+<details>
+<summary><strong>Updating the engine</strong></summary>
 
 Your repo is an instance of this template. To pull engine improvements:
 
@@ -98,17 +143,14 @@ git remote add upstream https://github.com/enckequity/samebrain.git   # once
 git pull upstream main                                                # whenever
 ```
 
-You edit `global/` and `memory/`; the template only evolves `bin/`, `hooks/`, and docs — so pulls merge cleanly.
-
-Optional: auto-render after every pull, so config changes land the moment they arrive:
-
-```bash
-git config core.hooksPath .githooks   # once per clone
-```
+You edit `global/` and `memory/`; the template only evolves `bin/`, `hooks/`, and docs — so pulls merge cleanly. Setup already enabled auto-render after every pull (`git config core.hooksPath .githooks`), so config changes land the moment they arrive.
 
 Tests live in `test/run.mjs` (no framework, no deps) and run on Linux/macOS/Windows in CI — `node test/run.mjs` locally before a PR.
 
-## Honest limits
+</details>
+
+<details>
+<summary><strong>Honest limits</strong></summary>
 
 Some surfaces are vendor-locked and cannot be file-synced; know them rather than fight them:
 
@@ -116,11 +158,16 @@ Some surfaces are vendor-locked and cannot be file-synced; know them rather than
 - **claude.ai OAuth connectors and Claude Code plugins** are account/installation state, not files.
 - **Per-repo configs** (project AGENTS.md / CLAUDE.md / `.cursor/rules`) belong in each project's repo — samebrain handles the global layer only.
 
-## Design notes
+</details>
+
+<details>
+<summary><strong>Design notes</strong></summary>
 
 - **Own renderer instead of an existing sync tool**: as of mid-2026 no tool rendered global rules + MCP + hooks across all three agents (the closest, rulesync, covers global rules for Claude Code/Copilot/opencode only). 150 lines was cheaper than the gap.
 - **Markdown-in-git memory instead of mem0/OpenMemory**: OpenMemory is sunset; hosted memory adds a service dependency, latency, and token overhead for worse recall guarantees at personal scale.
 - **Merge-only where agents own state**: `~/.claude.json` and hook files are merged key-by-key, never overwritten — samebrain coexists with whatever else manages those files.
+
+</details>
 
 ## License
 
