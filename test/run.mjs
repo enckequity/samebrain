@@ -606,6 +606,32 @@ const t = (name, cond) => {
   t('dashboard carries guardrails hash', /"hash":"[0-9a-f]{12}"/.test(html));
 }
 
+// 35. Recall re-renders when the engine revision changed (rebase pulls skip post-merge)
+{
+  const g = (...args) => execFileSync('git', args, { cwd: repo, stdio: ['ignore', 'pipe', 'pipe'] });
+  g('init');
+  g('config', 'user.email', 't@t');
+  g('config', 'user.name', 't');
+  g('add', '-A');
+  g('commit', '-m', 'engine state', '--quiet');
+  const home5 = join(work, 'home5');
+  mkdirSync(home5, { recursive: true });
+  const recall = () => spawnSync(process.execPath, [join(repo, 'hooks', 'recall.mjs')], {
+    env: { ...process.env, HOME: home5, USERPROFILE: home5, SB_FILE_TOKEN: 'x' }, encoding: 'utf8',
+  });
+  const r1 = recall();
+  t('recall still emits memory after render hook-in', r1.status === 0 && r1.stdout.includes('<shared-agent-memory'));
+  t('first recall renders the engine', existsSync(join(home5, '.claude', 'CLAUDE.md')));
+  t('render records the applied revision', read(join(repo, 'backups', '.last-render-head')).trim()
+    === g('rev-parse', 'HEAD').toString().trim());
+  rmSync(join(home5, '.claude', 'CLAUDE.md'));
+  recall();
+  t('unchanged engine: recall does not re-render', !existsSync(join(home5, '.claude', 'CLAUDE.md')));
+  g('commit', '--allow-empty', '-m', 'engine update', '--quiet');
+  recall();
+  t('new engine revision: recall re-renders', existsSync(join(home5, '.claude', 'CLAUDE.md')));
+}
+
 // 21. Invariants: no services, no LLM APIs anywhere in engine code
 {
   const forbidden = ['api.openai.com', 'api.anthropic.com', 'convex', 'workos', 'createServer', '.listen('];

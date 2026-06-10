@@ -413,3 +413,14 @@ if (changes.length === 0) {
   console.log(`render${CHECK ? ' --check (no writes)' : ''}:`);
   for (const c of changes) console.log(`  ${CHECK ? 'drift' : 'wrote'}: ${c}`);
 }
+
+// Record which engine revision this render applied — the session-start recall hook
+// re-renders when HEAD moves past this marker (rebase pulls never fire post-merge).
+if (!CHECK) {
+  try {
+    const head = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: ROOT, timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'] })
+      .toString().trim();
+    mkdirSync(join(ROOT, 'backups'), { recursive: true });
+    writeFileSync(join(ROOT, 'backups', '.last-render-head'), `${head}\n`);
+  } catch { /* not a git clone — marker simply doesn't exist */ }
+}
