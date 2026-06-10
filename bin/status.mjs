@@ -36,15 +36,16 @@ for (const machine of machines) {
   console.log(`  machine ${machine}: ${recs.length} session(s) this month${last}${synced}`);
 }
 
-// smartloop runs across all machines.
-const runs = machines.flatMap((m) => {
-  const p = join(telemetryRoot, m, 'smartloop-runs.jsonl');
-  return existsSync(p) ? jsonl(p) : [];
-});
-if (runs.length) {
+// smartloop + agent-fleet runs across all machines.
+for (const [label, file] of [['smartloop', 'smartloop-runs.jsonl'], ['fleet', 'fleet-runs.jsonl']]) {
+  const runs = machines.flatMap((m) => {
+    const p = join(telemetryRoot, m, file);
+    return existsSync(p) ? jsonl(p) : [];
+  });
+  if (!runs.length) continue;
   const by = {};
   for (const r of runs) by[r.outcome ?? 'unknown'] = (by[r.outcome ?? 'unknown'] ?? 0) + 1;
-  console.log(`  smartloop: ${runs.length} run(s) recorded (${Object.entries(by).map(([k, n]) => `${n} ${k}`).join(', ')})`);
+  console.log(`  ${label}: ${runs.length} run(s) recorded (${Object.entries(by).map(([k, n]) => `${n} ${k}`).join(', ')})`);
 }
 
 // Coordination leases (written from v4 on): list live claims, flag expired ones.

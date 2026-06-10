@@ -158,7 +158,7 @@ in `archive.jsonl`. smartloop runs add a summary record per finished run (`smart
 Everything reads the files already in your repo; nothing is hosted, nothing phones home:
 
 - `node bin/dashboard.mjs` — writes a static `dashboard.html` (gitignored): sessions per month
-  per machine/agent, smartloop run table with verdicts, memory index health. Open it in a browser.
+  per machine/agent, run table (smartloop + agent-fleet, when a fleet records to `telemetry/<machine>/fleet-runs.jsonl`), memory index health. Open it in a browser.
 - `node bin/export.mjs --format deepeval|openai-evals|text [--out file]` — exports the smartloop
   trace corpus as an eval dataset (the same formats OpenSync exports, so tooling interoperates).
   When a run's state file still exists, its Contract goal becomes the sample input.

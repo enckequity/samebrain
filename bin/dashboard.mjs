@@ -36,7 +36,10 @@ if (existsSync(telemetryRoot)) {
           }
         }
       } else if (f === 'smartloop-runs.jsonl') {
-        for (const run of jsonl(join(dir, f))) runs.push({ machine, ...run });
+        // tags last: a stray machine/source field in a record must not clobber them
+        for (const run of jsonl(join(dir, f))) runs.push({ ...run, machine, source: 'smartloop' });
+      } else if (f === 'fleet-runs.jsonl') {
+        for (const run of jsonl(join(dir, f))) runs.push({ ...run, machine, source: 'fleet' });
       }
     }
   }
@@ -61,14 +64,19 @@ try {
   rules.revisions = log.length;
 } catch { /* no git history — hash alone still renders */ }
 {
+  // Regret is a smartloop concept (done-then-redone = weak verification); fleet tasks
+  // legitimately re-run under the same id (Autopilot passes), so they don't count.
   const seenDone = new Set();
-  for (const r of [...runs].sort((a, b) => (a.ts ?? '').localeCompare(b.ts ?? ''))) {
+  for (const r of runs.filter((r) => r.source !== 'fleet').sort((a, b) => (a.ts ?? '').localeCompare(b.ts ?? ''))) {
     if (seenDone.has(r.slug)) rules.regrets += 1;
     if (r.outcome === 'done') seenDone.add(r.slug);
   }
 }
 
-const data = { generated: new Date().toISOString(), months, runs, memory, rules };
+// Newest-first, capped: fleet appends one line per terminal task, so the corpus outgrows
+// what a single inlined HTML table should carry long before the files need rotating.
+runs.sort((a, b) => (b.ts ?? '').localeCompare(a.ts ?? ''));
+const data = { generated: new Date().toISOString(), months, runs: runs.slice(0, 500), memory, rules };
 
 // ---- render ----------------------------------------------------------------------------
 const html = `<!doctype html>
@@ -83,11 +91,11 @@ const html = `<!doctype html>
 <h1>samebrain dashboard</h1>
 <p class="muted">generated <span id="gen"></span> — rebuild with <code>node bin/dashboard.mjs</code></p>
 <h2>Sessions per month (machine/agent)</h2><div id="sessions"></div>
-<h2>smartloop runs</h2><div id="runs"></div>
+<h2>Runs (smartloop + fleet)</h2><div id="runs"></div>
 <h2>Memory index health</h2><div id="memory"></div>
 <h2>Rule effectiveness</h2><div id="rules"></div>
 <script>
-const data = ${JSON.stringify(data)};
+const data = ${JSON.stringify(data).replace(/</g, '\\u003c')};
 document.getElementById('gen').textContent = data.generated;
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 {
@@ -103,10 +111,10 @@ const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&l
 }
 {
   const el = document.getElementById('runs');
-  if (!data.runs.length) el.innerHTML = '<p class="muted">no smartloop runs recorded yet</p>';
-  else el.innerHTML = '<table><tr><th>slug</th><th>machine</th><th>outcome</th><th>iters</th><th>wall</th><th>verdicts</th></tr>'
-    + data.runs.map((r) => '<tr><td>' + esc(r.slug) + '</td><td>' + esc(r.machine) + '</td><td>' + esc(r.outcome)
-      + '</td><td>' + esc(r.iters) + '</td><td>' + Math.round(r.wall_s / 60) + 'm</td><td>'
+  if (!data.runs.length) el.innerHTML = '<p class="muted">no smartloop or fleet runs recorded yet</p>';
+  else el.innerHTML = '<table><tr><th>slug</th><th>source</th><th>machine</th><th>outcome</th><th>iters</th><th>wall</th><th>verdicts</th></tr>'
+    + data.runs.map((r) => '<tr><td>' + esc(r.slug) + '</td><td>' + esc(r.source ?? 'smartloop') + '</td><td>' + esc(r.machine) + '</td><td>' + esc(r.outcome)
+      + '</td><td>' + esc(r.iters ?? '—') + '</td><td>' + (r.wall_s == null ? '—' : Math.round(r.wall_s / 60) + 'm') + '</td><td>'
       + esc((r.verdicts ?? []).map((v) => (v.lens ?? '?') + ':' + (v.verdict ?? '?')).join(' ') || '—') + '</td></tr>').join('') + '</table>';
 }
 {
