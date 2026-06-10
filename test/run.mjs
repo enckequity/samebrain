@@ -118,7 +118,19 @@ const t = (name, cond) => {
   t('over-cap index triggers warning', r.stdout.includes('WARNING: memory index'));
 }
 
-// 9. Detection gating: no .gemini/.copilot dirs → no files rendered for them
+// 9. secrets.env feeds ${VAR} refs (process env wins over the file)
+{
+  writeFileSync(join(repo, 'secrets.env'), '# comment\nSB_FILE_TOKEN = from-file\n');
+  const cfg = '{ "mcpServers": { "t": { "targets": ["cursor"], "type": "http", '
+    + '"url": "https://x.example/${SB_FILE_TOKEN}" } } }';
+  writeFileSync(join(repo, 'global', 'mcp.json'), cfg);
+  const r = render();
+  t('secrets.env resolves refs', r.status === 0 && read(at('.cursor', 'mcp.json')).includes('from-file'));
+  const r2 = render({ SB_FILE_TOKEN: 'from-env' });
+  t('process env beats secrets.env', r2.status === 0 && read(at('.cursor', 'mcp.json')).includes('from-env'));
+}
+
+// 10. Detection gating: no .gemini/.copilot dirs → no files rendered for them
 {
   const home2 = join(work, 'home2');
   mkdirSync(home2, { recursive: true });

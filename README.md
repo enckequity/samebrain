@@ -74,10 +74,10 @@ Discipline: one line per fact, cap the index at ~120 lines, prune stale facts. T
 
 String values in `global/mcp.json` support two reference forms, resolved at render time:
 
-- `${ENV_VAR}` — from the environment
+- `${ENV_VAR}` — from the environment, falling back to a gitignored `secrets.env` (KEY=VALUE lines) at the repo root
 - `op://vault/item/field` — via the [1Password CLI](https://developer.1password.com/docs/cli/)
 
-Rendered agent configs get literal values (agents can't expand references); the repo never holds a raw secret — even private forks shouldn't. Unresolvable references fail the render loudly, naming the variable.
+Rendered agent configs get literal values (agents can't expand references); the repo never holds a raw secret — even private forks shouldn't. Unresolvable references fail the render loudly, naming the variable. `secrets.env` exists for machines without a secret-manager CLI: rendered configs already hold resolved values locally, so a local env file adds no new exposure class — copy it once per machine and keep the canonical copy in your secret manager.
 
 ## Multi-agent coordination
 
