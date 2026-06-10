@@ -1,8 +1,10 @@
 // SessionStart sweep: surface smartloop runs needing attention (orphaned, parked,
 // limit-paused, blocked). Prints nothing when there is nothing — zero token tax.
-import { readRuns } from './smartloop-state.mjs';
+import { hasLiveWake, readRuns } from './smartloop-state.mjs';
 
-const runs = readRuns().filter((r) => r.status !== 'done');
+const runs = readRuns().filter(
+  (r) => r.status !== 'done' && (!hasLiveWake(r) || r.next_wake === 'parked'),
+);
 if (runs.length > 0) {
   console.log('<smartloop-runs>');
   for (const r of runs) {

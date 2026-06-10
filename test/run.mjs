@@ -191,6 +191,7 @@ const t = (name, cond) => {
   t('sweep exits 0', r.status === 0);
   t('sweep lists non-done runs', r.stdout.includes('dead-run') && r.stdout.includes('paused') && r.stdout.includes('overdue'));
   t('sweep omits done runs', !r.stdout.includes('finished'));
+  t('sweep spares sleeping runs', !r.stdout.includes('sleeping'));
   t('sweep gives resume hint', r.stdout.includes('/smartloop resume'));
   t('sweep silent when no runs', sweep(join(work, 'absent')).stdout.trim() === '');
 }
