@@ -18,9 +18,14 @@ lines, one line per fact.
 3. **Roll up.** Facts that are detail rather than index material move into the
    matching `memory/topics/<topic>.md` (create the topic file if needed),
    leaving at most a one-line pointer in the index.
-4. **Prune.** Delete facts that are stale, superseded, or machine-specific to a
-   machine that no longer exists. When unsure whether a fact is still true,
-   keep it and flag it with `(verify)` rather than guessing.
+4. **Prune by decay.** Facts may carry a last-confirmed date —
+   `(confirmed: YYYY-MM-DD)` — refreshed by any agent that re-verifies the
+   fact. Delete facts that are stale, superseded, or machine-specific to a
+   machine that no longer exists. Flag facts whose confirmed date (or, absent
+   one, best-guess age) is past **90 days** with `(verify)` rather than
+   deleting outright; a fact still flagged on the next gc pass gets pruned.
+   When adding a date, never invent one — only record a confirmation that
+   actually happened.
 5. **Show, don't commit.** Present the resulting diff of `MEMORY.md` (and any
    topic files) for approval. Never commit or push the change yourself — the
    session-end sync hook commits memory once the user accepts the edit.

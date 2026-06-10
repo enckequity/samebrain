@@ -115,6 +115,9 @@ is a git clone of it — park on one machine, resume on another:
 
 At every sleep decision: state what the wait is for, pick the lowest tier that
 serves it, park when in doubt — the state file guarantees nothing is lost.
+Learned pacing priors, when present, live in
+`{{REPO}}/global/addenda/smartloop-pacing.md` (regenerated from the trace
+corpus by `bin/optimize.mjs --pacing`) — consult them before choosing a tier.
 
 ## Verification tiers
 
