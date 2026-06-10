@@ -238,7 +238,7 @@ git remote add upstream https://github.com/enckequity/samebrain.git   # once
 git pull upstream main                                                # whenever
 ```
 
-You edit `global/` and `memory/`; the template only evolves `bin/`, `hooks/`, and docs — so pulls merge cleanly. Setup already enabled auto-render after every pull (`git config core.hooksPath .githooks`), so config changes land the moment they arrive.
+You edit `global/` and `memory/`; the template only evolves `bin/`, `hooks/`, and docs — so pulls merge cleanly. Setup already enabled auto-render after every pull (`git config core.hooksPath .githooks`), and the session-start recall hook re-renders whenever the engine revision changed since the last render (rebase pulls — like recall's own — never fire post-merge), so config changes land on every machine at the next session start, no manual step.
 
 Tests live in `test/run.mjs` (no framework, no deps) and run on Linux/macOS/Windows in CI — `node test/run.mjs` locally before a PR.
 

@@ -20,6 +20,22 @@ try {
   });
 } catch { /* offline or slow remote — serve the local copy */ }
 
+// Rebase pulls never fire the post-merge auto-render hook: re-render whenever HEAD
+// has moved past the last rendered revision, so engine updates land on every machine
+// at the next session start with no manual step. Best-effort, silent.
+try {
+  const head = execFileSync('git', ['rev-parse', 'HEAD'], {
+    cwd: root, timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'],
+  }).toString().trim();
+  let last = '';
+  try { last = readFileSync(join(root, 'backups', '.last-render-head'), 'utf8').trim(); } catch { /* never rendered */ }
+  if (head && head !== last) {
+    execFileSync(process.execPath, [join(root, 'bin', 'render.mjs')], {
+      cwd: root, timeout: 30000, stdio: ['ignore', 'ignore', 'ignore'],
+    });
+  }
+} catch { /* render failed or no git — post-merge hook and manual render still cover it */ }
+
 let index = '';
 try {
   index = readFileSync(join(root, 'memory', 'MEMORY.md'), 'utf8');
