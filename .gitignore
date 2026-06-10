@@ -2,3 +2,4 @@ backups/
 node_modules/
 secrets.env
 .cursor-rules-ack
+dashboard.html

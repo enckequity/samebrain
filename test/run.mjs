@@ -345,6 +345,99 @@ const t = (name, cond) => {
   t('user hook untouched by upgrade', cmds.includes('echo mine'));
 }
 
+// 22. dashboard.mjs: static page from telemetry fixtures, no server, gitignored
+{
+  const dir = join(repo, 'telemetry', 'dashbox');
+  mkdirSync(dir, { recursive: true });
+  const month = new Date().toISOString().slice(0, 7);
+  writeFileSync(join(dir, `${month}.jsonl`),
+    '{"ts":"2026-06-10T01:00:00Z","agent":"claude"}\n{"ts":"2026-06-10T02:00:00Z","agent":"claude"}\n{"ts":"2026-06-10T03:00:00Z","agent":"codex"}\n');
+  writeFileSync(join(dir, 'archive.jsonl'), '{"month":"2025-01","machine":"dashbox","sessions":7,"by_agent":{"cursor":7}}\n');
+  writeFileSync(join(dir, 'smartloop-runs.jsonl'),
+    '{"ts":"2026-06-10T04:00:00Z","slug":"dash-run","outcome":"done","iters":3,"wall_s":600,"verdicts":[{"lens":"security","verdict":"pass","reason":"ok"}]}\n');
+  const r = spawnSync(process.execPath, [join(repo, 'bin', 'dashboard.mjs')], { env, encoding: 'utf8' });
+  t('dashboard exits 0', r.status === 0);
+  const html = read(join(repo, 'dashboard.html'));
+  t('dashboard inlines sessions per machine/agent', html.includes('dashbox') && html.includes(`"${month}"`));
+  t('dashboard includes archived months', html.includes('2025-01'));
+  t('dashboard lists smartloop runs with verdicts', html.includes('dash-run') && html.includes('security'));
+  t('dashboard reports memory health', html.includes('Memory index health'));
+  t('dashboard.html is gitignored', read(join(repo, '.gitignore')).includes('dashboard.html'));
+}
+
+// 23. export.mjs: eval-dataset formats over the trace corpus, schema-shape asserted
+{
+  const sl = join(work, 'export-state');
+  mkdirSync(join(sl, 'dash-run'), { recursive: true });
+  writeFileSync(join(sl, 'dash-run', 'state.md'),
+    '---\nslug: dash-run\nstatus: done\nowner_session: s1\n---\n## Contract\nGoal: Fix the dashboard\n');
+  const exp = (...args) => spawnSync(process.execPath, [join(repo, 'bin', 'export.mjs'), ...args], {
+    env: { ...env, SMARTLOOP_DIR: sl }, encoding: 'utf8',
+  });
+  const de = exp('--format', 'deepeval');
+  t('deepeval export exits 0', de.status === 0);
+  const cases = JSON.parse(de.stdout);
+  const c = cases.find((x) => x.metadata.slug === 'dash-run');
+  t('deepeval is a JSON array of test cases', Array.isArray(cases) && cases.length >= 1);
+  t('deepeval joins contract goal from state file', c?.input === 'Fix the dashboard');
+  t('deepeval case shape', c && 'actual_output' in c && 'expected_output' in c && Array.isArray(c.metadata.verdicts));
+  const oe = exp('--format', 'openai-evals');
+  const lines = oe.stdout.trim().split('\n').map((l) => JSON.parse(l));
+  t('openai-evals is JSONL with input/ideal', lines.length >= 1
+    && lines.every((l) => l.input?.[0]?.role === 'user' && typeof l.ideal === 'string'));
+  const tx = exp('--format', 'text');
+  t('text export is tab-separated', tx.stdout.includes('dash-run\tdone\t3\t600'));
+  t('unknown format fails loud', exp('--format', 'csv').status === 1);
+}
+
+// 24. status.mjs: fleet view from telemetry + leases, degrades without git history
+{
+  const leases = join(repo, 'coordination', 'leases');
+  mkdirSync(leases, { recursive: true });
+  writeFileSync(join(leases, 'repo-x.lease'), JSON.stringify({ owner: 'claude@dashbox', expires: '2099-01-01T00:00:00Z' }));
+  writeFileSync(join(leases, 'repo-y.lease'), JSON.stringify({ owner: 'codex@oldbox', expires: '2020-01-01T00:00:00Z' }));
+  const r = spawnSync(process.execPath, [join(repo, 'bin', 'status.mjs')], { env, encoding: 'utf8' });
+  t('status exits 0 without git history', r.status === 0);
+  t('status lists machines with session counts', r.stdout.includes('machine dashbox: 3 session(s)'));
+  t('status summarizes smartloop runs', /smartloop: \d+ run\(s\) recorded/.test(r.stdout));
+  t('status shows live lease', r.stdout.includes('lease repo-x: held by claude@dashbox'));
+  t('status flags expired lease', r.stdout.includes('lease repo-y: EXPIRED'));
+  rmSync(leases, { recursive: true }); // v3 only reads leases; fixtures shouldn't leak into later renders
+}
+
+// 25. setup --opensync prints the adapter install steps (never auto-installs)
+{
+  const r = spawnSync(process.execPath, [join(repo, 'bin', 'setup.mjs'), '--opensync'], {
+    env: { ...env, SB_FILE_TOKEN: 'x' }, encoding: 'utf8',
+  });
+  t('setup --opensync exits 0', r.status === 0);
+  t('opensync plugins printed', ['claude-code-sync', 'codex-sync', 'cursor-sync-plugin'].every((p) => r.stdout.includes(p)));
+  t('opensync names the local alternative', r.stdout.includes('dashboard.mjs'));
+  t('opensync is print-only (no npm exec)', !read(join(repo, 'bin', 'setup.mjs')).match(/spawnSync\([^)]*npm/));
+}
+
+// 26. Cross-machine resume: park on clone A, resume on clone B (the documented sequence)
+{
+  const g = (cwd, ...args) => execFileSync('git', args, { cwd, stdio: ['ignore', 'pipe', 'pipe'] });
+  const remote = join(work, 'state-remote.git');
+  const a = join(work, 'machine-a');
+  const b = join(work, 'machine-b');
+  execFileSync('git', ['init', '--bare', remote], { stdio: 'ignore' });
+  g(work, 'clone', remote, a);
+  g(work, 'clone', remote, b);
+  for (const c of [a, b]) { g(c, 'config', 'user.email', 't@t'); g(c, 'config', 'user.name', 't'); }
+  mkdirSync(join(a, 'demo-task'), { recursive: true });
+  writeFileSync(join(a, 'demo-task', 'state.md'),
+    '---\nslug: demo-task\nstatus: waiting:user\nowner_session: sA\nowner_machine: machine-a\nnext_wake: parked\n---\n## Contract\nGoal: demo\n');
+  g(a, 'add', '-A'); g(a, 'commit', '-m', 'smartloop: demo-task parked'); g(a, 'push');
+  g(b, 'pull', '--rebase', '--autostash');
+  t('parked state resumes on second clone', read(join(b, 'demo-task', 'state.md')).includes('status: waiting:user'));
+  t('resume procedure is documented', existsSync(join(repo, 'docs', 'cross-machine-resume.md')));
+  t('skill carries sync + takeover protocol', read(join(repo, 'skills', 'smartloop', 'SKILL.md')).includes('SMARTLOOP_SYNC_REMOTE')
+    && read(join(repo, 'skills', 'smartloop', 'SKILL.md')).includes('owner_machine'));
+  t('verdicts are schema-pinned in the skill', read(join(repo, 'skills', 'smartloop', 'SKILL.md')).includes('"lens"'));
+}
+
 // 21. Invariants: no services, no LLM APIs anywhere in engine code
 {
   const forbidden = ['api.openai.com', 'api.anthropic.com', 'convex', 'workos', 'createServer', '.listen('];
