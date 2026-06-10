@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // One-command setup. Renders config to every agent and turns on auto-render after git pulls.
 //   node bin/setup.mjs
+//   node bin/setup.mjs --opensync   also print install steps for OpenSync session-sync plugins
 import { execFileSync, spawnSync } from 'node:child_process';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -8,6 +9,18 @@ import { fileURLToPath } from 'node:url';
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 
 console.log('samebrain setup\n');
+
+// Optional adapter: hosted dashboards via OpenSync (opensync.dev). samebrain never depends
+// on it — the local alternative is node bin/dashboard.mjs. Printed, not auto-installed:
+// setup must stay offline-safe and never modify global npm state unasked.
+if (process.argv.includes('--opensync')) {
+  console.log(`OpenSync session-sync plugins (hosted dashboards — local alternative: node bin/dashboard.mjs):
+  npm install -g claude-code-sync      && claude-code-sync login
+  npm install -g codex-sync            && codex-sync login
+  npm install -g cursor-sync-plugin    && cursor-sync login
+Docs: https://opensync.dev
+`);
+}
 
 // 1. Render config to every agent on this machine.
 const render = spawnSync(process.execPath, [join(ROOT, 'bin', 'render.mjs')], {

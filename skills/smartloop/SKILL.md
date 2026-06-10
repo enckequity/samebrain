@@ -53,9 +53,25 @@ non-terminal run and no live wake (and not `parked`) is blocked. The audit
 only protects the session named in `owner_session`.
 
 The front matter is a machine-parseable contract: exactly the keys
-`slug`, `status`, `owner_session`, `next_wake` (when applicable), one
-`key: value` per line, no nesting, no extra keys. Tooling parses it; prose
-belongs in the body.
+`slug`, `status`, `owner_session`, `owner_machine` (when state sync is on),
+`next_wake` (when applicable), one `key: value` per line, no nesting, no extra
+keys. Tooling parses it; prose belongs in the body.
+
+## Cross-machine resume (optional)
+
+When `SMARTLOOP_SYNC_REMOTE` is set (a private git remote URL), the state dir
+is a git clone of it — park on one machine, resume on another:
+
+- **Once per machine:** `git clone "$SMARTLOOP_SYNC_REMOTE" <state-dir>` (or
+  `git init` + `git remote add origin` in an existing dir).
+- **At park** (and at every terminal checkpoint): `git add -A && git commit -m
+  "smartloop: <slug> <status>" && git push` from the state dir. Fail-silent —
+  offline parks reconcile on the next pull.
+- **At resume entry**, before Rehydrate: `git pull --rebase --autostash` from
+  the state dir, then proceed.
+- **Takeover rule:** claim both `owner_session` and `owner_machine` (short
+  hostname). Never take over a run whose `next_wake` is a live future
+  timestamp on another machine — a sleeping owner is not abandoned.
 
 ## Every entry — start, wake, or resume — runs the same 6 steps
 
@@ -117,6 +133,11 @@ serves it, park when in doubt — the state file guarantees nothing is lost.
   adversarial panel — 3 lenses (correctness, security, does-the-result-satisfy-
   the-contract), schema-forced verdicts, majority rules. For code, review and
   refutation merge into this single panel.
+- **Panel verdicts are labeled data.** Record each tier-2 verdict as a
+  structured object — `{"lens": "correctness|security|contract", "verdict":
+  "pass|fail", "reason": "<one line>"}` — in the run's evidence, and carry the
+  array into the run-summary `verdicts` field at finish. Never free-prose a
+  verdict; the corpus feeds later analysis.
 - When in doubt, tier up.
 
 ## Token rules (mandatory)

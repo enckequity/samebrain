@@ -147,6 +147,28 @@ in `archive.jsonl`. smartloop runs add a summary record per finished run (`smart
 </details>
 
 <details>
+<summary><strong>Dashboards, evals, fleet status — local, zero services</strong></summary>
+
+Everything reads the files already in your repo; nothing is hosted, nothing phones home:
+
+- `node bin/dashboard.mjs` — writes a static `dashboard.html` (gitignored): sessions per month
+  per machine/agent, smartloop run table with verdicts, memory index health. Open it in a browser.
+- `node bin/export.mjs --format deepeval|openai-evals|text [--out file]` — exports the smartloop
+  trace corpus as an eval dataset (the same formats OpenSync exports, so tooling interoperates).
+  When a run's state file still exists, its Contract goal becomes the sample input.
+- `node bin/status.mjs` — one-screen fleet view: machines seen, sessions this month, last git
+  sync per machine, smartloop run tallies, coordination leases.
+
+Prefer hosted dashboards? `node bin/setup.mjs --opensync` prints install steps for the
+[OpenSync](https://opensync.dev) sync plugins — an optional adapter, never a dependency.
+
+smartloop runs can also park on one machine and resume on another: set `SMARTLOOP_SYNC_REMOTE`
+to a private git remote and the state dir syncs at park/resume boundaries — see
+`docs/cross-machine-resume.md`.
+
+</details>
+
+<details>
 <summary><strong>Secrets</strong></summary>
 
 String values in `global/mcp.json` support two reference forms, resolved at render time:
