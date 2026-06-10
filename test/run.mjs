@@ -181,6 +181,20 @@ const t = (name, cond) => {
   }).status === 0);
 }
 
+// 12. smartloop-sweep: surfaces non-done runs at session start, silent when none
+{
+  const sl = join(work, 'smartloop'); // fixtures from block 11
+  const sweep = (dir) => spawnSync(process.execPath, [join(repo, 'hooks', 'smartloop-sweep.mjs')], {
+    env: { ...env, SMARTLOOP_DIR: dir }, encoding: 'utf8',
+  });
+  const r = sweep(sl);
+  t('sweep exits 0', r.status === 0);
+  t('sweep lists non-done runs', r.stdout.includes('dead-run') && r.stdout.includes('paused') && r.stdout.includes('overdue'));
+  t('sweep omits done runs', !r.stdout.includes('finished'));
+  t('sweep gives resume hint', r.stdout.includes('/smartloop resume'));
+  t('sweep silent when no runs', sweep(join(work, 'absent')).stdout.trim() === '');
+}
+
 rmSync(work, { recursive: true, force: true });
 console.log(failures ? `\n${failures} failure(s)` : '\nall tests passed');
 process.exit(failures ? 1 : 0);
