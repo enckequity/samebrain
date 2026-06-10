@@ -2,6 +2,8 @@
 // Build dashboard.html from telemetry/ + memory/ — a static, dependency-free local page.
 //   node bin/dashboard.mjs            writes dashboard.html at the repo root (gitignored)
 // No server, no build step, no network: data is inlined; open the file in a browser.
+import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -40,12 +42,33 @@ if (existsSync(telemetryRoot)) {
   }
 }
 
-let memory = { lines: 0, cap: 120 };
+let memory = { lines: 0, cap: 120, verify_flags: 0 };
 try {
-  memory.lines = read(join(ROOT, 'memory', 'MEMORY.md')).split('\n').filter((l) => l.trim()).length;
+  const index = read(join(ROOT, 'memory', 'MEMORY.md'));
+  memory.lines = index.split('\n').filter((l) => l.trim()).length;
+  memory.verify_flags = (index.match(/\(verify\)/g) ?? []).length;
 } catch { /* no index yet */ }
 
-const data = { generated: new Date().toISOString(), months, runs, memory };
+// Rule effectiveness: which guardrail revision was live, against correction proxies —
+// memory (verify) flags and smartloop regret (done-then-redone runs).
+const rules = { hash: null, changed: null, revisions: 0, regrets: 0 };
+try {
+  rules.hash = createHash('sha256').update(read(join(ROOT, 'global', 'guardrails.md'))).digest('hex').slice(0, 12);
+  const log = execFileSync('git', ['log', '--format=%cs', '--', 'global/guardrails.md'], {
+    cwd: ROOT, timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'],
+  }).toString().trim().split('\n').filter(Boolean);
+  rules.changed = log[0] ?? null;
+  rules.revisions = log.length;
+} catch { /* no git history — hash alone still renders */ }
+{
+  const seenDone = new Set();
+  for (const r of [...runs].sort((a, b) => (a.ts ?? '').localeCompare(b.ts ?? ''))) {
+    if (seenDone.has(r.slug)) rules.regrets += 1;
+    if (r.outcome === 'done') seenDone.add(r.slug);
+  }
+}
+
+const data = { generated: new Date().toISOString(), months, runs, memory, rules };
 
 // ---- render ----------------------------------------------------------------------------
 const html = `<!doctype html>
@@ -62,6 +85,7 @@ const html = `<!doctype html>
 <h2>Sessions per month (machine/agent)</h2><div id="sessions"></div>
 <h2>smartloop runs</h2><div id="runs"></div>
 <h2>Memory index health</h2><div id="memory"></div>
+<h2>Rule effectiveness</h2><div id="rules"></div>
 <script>
 const data = ${JSON.stringify(data)};
 document.getElementById('gen').textContent = data.generated;
@@ -90,6 +114,16 @@ const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&l
   const over = data.memory.lines > data.memory.cap;
   el.innerHTML = '<p>index: <strong class="' + (over ? 'warn' : 'ok') + '">' + data.memory.lines
     + ' lines</strong> (cap ' + data.memory.cap + ')' + (over ? ' — run /memory-gc' : '') + '</p>';
+}
+{
+  const el = document.getElementById('rules');
+  const r = data.rules;
+  const corrections = data.memory.verify_flags + r.regrets;
+  el.innerHTML = '<p>guardrails revision <code>' + esc(r.hash ?? 'n/a') + '</code>'
+    + (r.changed ? ', last changed ' + esc(r.changed) + ' (' + r.revisions + ' revision' + (r.revisions === 1 ? '' : 's') + ')' : '')
+    + '</p><p>correction pressure under this revision: <strong class="' + (corrections ? 'warn' : 'ok') + '">' + corrections + '</strong>'
+    + ' (' + data.memory.verify_flags + ' unverified memory facts, ' + r.regrets + ' redone smartloop runs)'
+    + (corrections ? ' — repeated corrections are rule-mine material (/rule-mine)' : '') + '</p>';
 }
 </script></body></html>
 `;

@@ -235,8 +235,8 @@ const t = (name, cond) => {
   t('memory-gc skill renders to claude', existsSync(at('.claude', 'skills', 'memory-gc', 'SKILL.md')));
   t('memory-gc skill renders to cursor', existsSync(at('.cursor', 'skills', 'memory-gc', 'SKILL.md')));
   t('memory-gc skill renders to codex prompts', existsSync(at('.codex', 'prompts', 'memory-gc.md')));
-  t('smartloop stays claude-only (targets: claude)',
-    !existsSync(at('.cursor', 'skills', 'smartloop', 'SKILL.md')) && !existsSync(at('.codex', 'prompts', 'smartloop.md')));
+  t('smartloop renders to every agent (v5: agent-neutral)',
+    existsSync(at('.cursor', 'skills', 'smartloop', 'SKILL.md')) && existsSync(at('.codex', 'prompts', 'smartloop.md')));
   t('cursor skill carries repo-path substitution', !read(at('.cursor', 'skills', 'memory-gc', 'SKILL.md')).includes('{{REPO}}'));
 }
 
@@ -498,6 +498,110 @@ const t = (name, cond) => {
   t('rule-mine resolves repo path', !skill.includes('{{REPO}}'));
   const claudeMd = read(at('.claude', 'CLAUDE.md'));
   t('coordination carries the lease protocol', claudeMd.includes('lease-check.mjs claim'));
+}
+
+// 30. Wider agent matrix: opencode / Factory Droid / Pi, detection-gated like Gemini/Copilot
+{
+  const home4 = join(work, 'home4');
+  mkdirSync(join(home4, '.config', 'opencode'), { recursive: true });
+  mkdirSync(join(home4, '.factory'), { recursive: true });
+  const r = spawnSync(process.execPath, [join(repo, 'bin', 'render.mjs')], {
+    env: { ...process.env, HOME: home4, USERPROFILE: home4, SB_FILE_TOKEN: 'x' }, encoding: 'utf8',
+  });
+  t('matrix render exits 0', r.status === 0);
+  t('opencode gets AGENTS.md', existsSync(join(home4, '.config', 'opencode', 'AGENTS.md')));
+  t('droid gets AGENTS.md', existsSync(join(home4, '.factory', 'AGENTS.md')));
+  t('pi skipped when absent', !existsSync(join(home4, '.pi', 'AGENTS.md')));
+  t('matrix targets carry memory bootstrap', read(join(home4, '.config', 'opencode', 'AGENTS.md')).includes('Memory bootstrap'));
+}
+
+// 31. Cross-agent smartloop: liveness hooks in all three agents; cursor/codex payload shapes
+{
+  render({ SB_FILE_TOKEN: 'x' });
+  const codexCmds = JSON.parse(read(at('.codex', 'hooks.json')));
+  const codexAll = Object.values(codexCmds.hooks).flat().flatMap((e) => e.hooks ?? []).map((h) => h.command);
+  t('codex gets smartloop liveness hooks', codexAll.some((c) => c.includes('smartloop-sweep.mjs'))
+    && codexAll.some((c) => c.includes('smartloop-stop.mjs')));
+  const cursorCmds = JSON.parse(read(at('.cursor', 'hooks.json')));
+  const cursorAll = Object.values(cursorCmds.hooks).flat().map((h) => h.command);
+  t('cursor gets smartloop liveness hooks', cursorAll.some((c) => c.includes('smartloop-sweep.mjs') && c.includes('--cursor'))
+    && cursorAll.some((c) => c.includes('smartloop-stop.mjs')));
+  const sl = join(work, 'smartloop-x');
+  mkdirSync(join(sl, 'cursor-run'), { recursive: true });
+  writeFileSync(join(sl, 'cursor-run', 'state.md'),
+    '---\nslug: cursor-run\nstatus: working\nowner_session: conv-9\n---\n## Contract\n');
+  const stop = (payload) => spawnSync(process.execPath, [join(repo, 'hooks', 'smartloop-stop.mjs')], {
+    env: { ...env, SMARTLOOP_DIR: sl }, input: JSON.stringify(payload), encoding: 'utf8',
+  });
+  t('stop audit accepts cursor conversation_id', stop({ conversation_id: 'conv-9' }).status === 2);
+  t('foreign conversation passes', stop({ conversation_id: 'conv-other' }).status === 0);
+  const sw = spawnSync(process.execPath, [join(repo, 'hooks', 'smartloop-sweep.mjs'), '--cursor'], {
+    env: { ...env, SMARTLOOP_DIR: sl }, encoding: 'utf8',
+  });
+  let wrapped = null;
+  try { wrapped = JSON.parse(sw.stdout); } catch { /* fails assertion */ }
+  t('sweep --cursor wraps in JSON contract', typeof wrapped?.additional_context === 'string'
+    && wrapped.additional_context.includes('cursor-run'));
+  const skill = read(join(repo, 'skills', 'smartloop', 'SKILL.md'));
+  t('skill carries the adapter table', skill.includes('## Agent adapters') && skill.includes('park-only'));
+}
+
+// 32. Portfolio mode: ordered drain queue — cheap first, limit-paused deferred
+{
+  const sl = join(work, 'portfolio');
+  const mk = (slug, status, journalLines) => {
+    mkdirSync(join(sl, slug), { recursive: true });
+    writeFileSync(join(sl, slug, 'state.md'),
+      `---\nslug: ${slug}\nstatus: ${status}\nowner_session: s1\n---\n## Contract\nGoal: x\n## Journal\n${
+        Array.from({ length: journalLines }, (_, i) => `- iter ${i}`).join('\n')}\n## Next action\nz\n`);
+  };
+  mk('heavy-run', 'working', 40);
+  mk('light-run', 'waiting:ci', 3);
+  mk('paused-run', 'limit-paused', 10);
+  mk('done-run', 'done', 5);
+  const r = spawnSync(process.execPath, [join(repo, 'hooks', 'smartloop-sweep.mjs'), '--portfolio'], {
+    env: { ...env, SMARTLOOP_DIR: sl }, encoding: 'utf8',
+  });
+  t('portfolio exits 0', r.status === 0);
+  const order = r.stdout;
+  t('cheapest rehydrate first', order.indexOf('1. light-run') !== -1 && order.indexOf('2. heavy-run') !== -1);
+  t('limit-paused deferred to the end', order.includes('deferred: paused-run')
+    && order.indexOf('deferred: paused-run') > order.indexOf('heavy-run'));
+  t('done runs excluded from the portfolio', !order.includes('done-run'));
+  t('portfolio silent when empty', spawnSync(process.execPath, [join(repo, 'hooks', 'smartloop-sweep.mjs'), '--portfolio'], {
+    env: { ...env, SMARTLOOP_DIR: join(work, 'absent') }, encoding: 'utf8',
+  }).stdout.trim() === '');
+}
+
+// 33. Bounded tier self-tuning: --apply-tiers needs declared bounds, clamps inside them
+{
+  const opt = (...args) => spawnSync(process.execPath, [join(repo, 'bin', 'optimize.mjs'), ...args], {
+    env, encoding: 'utf8',
+  });
+  const noBounds = opt('--apply-tiers');
+  t('apply-tiers without bounds refuses (exit 1)', noBounds.status === 1 && noBounds.stderr.includes('smartloop-bounds.json'));
+  writeFileSync(join(repo, 'global', 'smartloop-bounds.json'), '{"floor": 1, "ceiling": 2}\n');
+  const tiersFile = join(repo, 'global', 'addenda', 'smartloop-tiers.md');
+  t('apply-tiers writes within bounds', opt('--apply-tiers').status === 0
+    && read(tiersFile).includes('flaky-task: verify at tier >= 2'));
+  t('tiers file carries generated marker + bounds pointer', read(tiersFile).includes('generated by bin/optimize.mjs')
+    && read(tiersFile).includes('smartloop-bounds.json'));
+  writeFileSync(join(repo, 'global', 'smartloop-bounds.json'), '{"floor": 0, "ceiling": 1}\n');
+  t('ceiling clamps the applied tier', opt('--apply-tiers').status === 0
+    && read(tiersFile).includes('flaky-task: verify at tier >= 1'));
+  writeFileSync(join(repo, 'global', 'smartloop-bounds.json'), '{"floor": 2, "ceiling": 1}\n');
+  t('inverted bounds rejected', opt('--apply-tiers').status === 1);
+  t('skill points at the learned tier floors', read(join(repo, 'skills', 'smartloop', 'SKILL.md')).includes('smartloop-tiers.md'));
+}
+
+// 34. Dashboard v2: rule-effectiveness panel from guardrail hash + correction proxies
+{
+  const r = spawnSync(process.execPath, [join(repo, 'bin', 'dashboard.mjs')], { env, encoding: 'utf8' });
+  t('dashboard v2 exits 0', r.status === 0);
+  const html = read(join(repo, 'dashboard.html'));
+  t('dashboard shows rule effectiveness', html.includes('Rule effectiveness'));
+  t('dashboard counts redone runs as correction pressure', html.includes('"regrets":1'));
+  t('dashboard carries guardrails hash', /"hash":"[0-9a-f]{12}"/.test(html));
 }
 
 // 21. Invariants: no services, no LLM APIs anywhere in engine code

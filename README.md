@@ -84,9 +84,11 @@ Also covered, automatically detected (rendered only if the agent's directory exi
 
 - **Gemini CLI** → `~/.gemini/GEMINI.md`
 - **GitHub Copilot CLI** → `~/.copilot/instructions/samebrain.instructions.md`
-- **opencode** → nothing to render: it reads `~/.claude/CLAUDE.md` globally by default, so it inherits samebrain for free.
+- **opencode** → `~/.config/opencode/AGENTS.md` (it also reads `~/.claude/CLAUDE.md` by default, but an explicit file survives that default changing)
+- **Factory Droid** → `~/.factory/AGENTS.md`
+- **Pi** → `~/.pi/AGENTS.md`
 
-Gemini/Copilot don't get memory hooks yet — their rendered instructions carry a memory-bootstrap line telling the agent to read the shared index at session start.
+These detection-gated agents don't get memory hooks yet (their harnesses don't expose them) — their rendered instructions carry a memory-bootstrap line telling the agent to read the shared index at session start.
 
 `node bin/render.mjs --check` reports drift without writing anything. The first render backs up anything it replaces to `backups/` (gitignored).
 
@@ -117,9 +119,13 @@ success criteria, tiered verification, subagent context firewalls, cache-aware
 wake pacing, and park/resume across rate limits. Two liveness hooks make silent
 loop death impossible — a Stop dead-man check blocks ending a session that owns
 a run with no scheduled wake, and a session-start sweep surfaces orphaned or
-parked runs (printing nothing when there are none). Claude Code only; design
-rationale in `docs/plans/2026-06-10-smartloop-design.md`. The skill ships in
-`skills/smartloop/` and renders to `~/.claude/skills/` like every other target.
+parked runs (printing nothing when there are none). Agent-neutral since v5: the
+skill and both liveness hooks render to Claude Code, Codex, and Cursor, with an
+adapter table mapping each harness's session id and wake primitives (agents
+without scheduled wakes run park-only). `/smartloop portfolio` drains every
+non-done run under one quota, cheapest rehydrate first. Design rationale in
+`docs/plans/2026-06-10-smartloop-design.md`. The skill ships in
+`skills/smartloop/` and renders like every other target.
 
 Two lifecycle notes: runs with status `blocked:*` keep appearing at session
 start until you mark them `done` or delete `~/.smartloop/<slug>/` — that is
@@ -201,8 +207,10 @@ services, still no LLM calls inside the engine:
   median wall-time/iteration priors from the trace corpus; smartloop consults it at sleep
   decisions.
 - `node bin/optimize.mjs --regret` — lists runs that were marked done and later redone: the
-  verification that passed them was too weak. Suggestions, not auto-applied (bounded
-  auto-apply ships behind explicit floor/ceiling bounds).
+  verification that passed them was too weak. `--apply-tiers` turns those into learned tier
+  floors in `global/addenda/smartloop-tiers.md`, but only inside the floor/ceiling you declare
+  in `global/smartloop-bounds.json` — no bounds file, no self-tuning. Every applied change is a
+  git commit away from reverting.
 - `node bin/optimize.mjs --export-dspy` — the corpus as a DSPy-ready dataset. Actually running
   a prompt optimizer against it is an explicit offline step you invoke with your own key —
   never part of any hook or render.

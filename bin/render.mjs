@@ -97,6 +97,21 @@ if (existsSync(join(HOME, '.copilot'))) {
     'copilot: ~/.copilot/instructions/samebrain.instructions.md',
   );
 }
+// opencode (also reads ~/.claude/CLAUDE.md, but an explicit AGENTS.md survives that
+// default changing), Factory Droid, and Pi: global AGENTS.md, detection-gated.
+for (const [name, dir] of [
+  ['opencode', join(HOME, '.config', 'opencode')],
+  ['droid', join(HOME, '.factory')],
+  ['pi', join(HOME, '.pi')],
+]) {
+  if (existsSync(dir)) {
+    writeIfChanged(
+      join(dir, 'AGENTS.md'),
+      `${MARKER}\n\n${guardrails}\n\n${coordination}${addendum(name)}${MEMORY_BOOTSTRAP}\n`,
+      `${name}: ${join(dir, 'AGENTS.md')}`,
+    );
+  }
+}
 
 // ---- 3. MCP ------------------------------------------------------------------------
 // Optional machine-local secrets file (gitignored): KEY=VALUE lines feed ${VAR} refs.
@@ -307,17 +322,31 @@ mergeJsonFile(join(HOME, '.cursor', 'hooks.json'), 'cursor: hooks.json memory ho
     }
   }
 }
+// smartloop liveness hooks — all three agents (the state-file protocol is agent-neutral).
+const sweep = join(ROOT, 'hooks', 'smartloop-sweep.mjs');
+const slStop = join(ROOT, 'hooks', 'smartloop-stop.mjs');
 mergeJsonFile(join(HOME, '.claude', 'settings.json'), 'claude: settings.json smartloop hooks', (s) => {
   s.hooks ??= {};
-  const ensure = (event, command) => {
+  const entry = (command) => ({ matcher: '', hooks: [{ type: 'command', command }] });
+  ensureNested(s, 'SessionStart', cmd(sweep), sweep, entry);
+  ensureNested(s, 'Stop', cmd(slStop), slStop, entry);
+});
+mergeJsonFile(join(HOME, '.codex', 'hooks.json'), 'codex: hooks.json smartloop hooks', (s) => {
+  s.hooks ??= {};
+  const entry = (command) => ({ hooks: [{ type: 'command', command }] });
+  ensureNested(s, 'SessionStart', cmd(sweep), sweep, entry);
+  ensureNested(s, 'Stop', cmd(slStop), slStop, entry);
+});
+mergeJsonFile(join(HOME, '.cursor', 'hooks.json'), 'cursor: hooks.json smartloop hooks', (s) => {
+  s.version ??= 1;
+  s.hooks ??= {};
+  const ensure = (event, command, script) => {
     s.hooks[event] ??= [];
-    const all = s.hooks[event].flatMap((e) => e.hooks ?? []);
-    if (!all.some((h) => h.command === command)) {
-      s.hooks[event].push({ matcher: '', hooks: [{ type: 'command', command }] });
-    }
+    s.hooks[event] = s.hooks[event].filter((h) => h.command === command || !managesScript(h.command, script));
+    if (!s.hooks[event].some((h) => h.command === command)) s.hooks[event].push({ command });
   };
-  ensure('SessionStart', cmd(join(ROOT, 'hooks', 'smartloop-sweep.mjs')));
-  ensure('Stop', cmd(join(ROOT, 'hooks', 'smartloop-stop.mjs')));
+  ensure('sessionStart', cmd(sweep, '--cursor'), sweep);
+  ensure('stop', cmd(slStop), slStop);
 });
 
 // ---- 6. Telemetry hygiene -------------------------------------------------------------

@@ -1,7 +1,6 @@
 ---
 name: smartloop
-description: Run any task as a token-optimized, verification-tiered, self-pacing loop with durable state. Use on /smartloop <task>, /smartloop resume [slug], /smartloop status, /smartloop backlog <source>.
-targets: claude
+description: Run any task as a token-optimized, verification-tiered, self-pacing loop with durable state. Use on /smartloop <task>, /smartloop resume [slug], /smartloop status, /smartloop portfolio, /smartloop backlog <source>.
 ---
 
 # smartloop
@@ -21,7 +20,25 @@ limits never lose work. The conversation is scratch; the state file is memory.
 - `/smartloop status` — print one line per run from the state files; when
   `{{REPO}}/telemetry/*/smartloop-runs.jsonl` has a record for a slug, append
   its cost line (iters, wall time, outcome); nothing else
+- `/smartloop portfolio` — drain every non-done run under one quota (below)
 - `/smartloop backlog <source>` — queue-draining mode (below)
+
+## Agent adapters
+
+The protocol and state files are agent-neutral; only the harness primitives
+differ. Look up your row and substitute accordingly:
+
+| Adapter | Claude Code | Codex | Cursor |
+|---|---|---|---|
+| Session id (for `owner_session`) | `CLAUDE_CODE_SESSION_ID` env | session/thread id from the harness | conversation id from the harness |
+| Scheduled wakes | native (ScheduleWakeup) | none → park-only | background agents only → park-only |
+| Liveness hooks | SessionStart sweep + Stop audit | same (hooks.json) | same (hooks.json) |
+
+**Park-only fallback:** without scheduled wakes, ladder tiers 1–2 are
+unavailable — use tier 0 (harness-tracked work) or park (tier 3). A parked run
+is resumable from any agent: state files carry no agent-specific content.
+If you cannot determine a session id, use `<agent>-<machine>-<date>`; the Stop
+audit only protects exact `owner_session` matches, so a stable id matters.
 
 ## State file format
 
@@ -141,6 +158,10 @@ corpus by `bin/optimize.mjs --pacing`) — consult them before choosing a tier.
   "pass|fail", "reason": "<one line>"}` — in the run's evidence, and carry the
   array into the run-summary `verdicts` field at finish. Never free-prose a
   verdict; the corpus feeds later analysis.
+- **Learned tier floors:** `{{REPO}}/global/addenda/smartloop-tiers.md`, when
+  present, lists task patterns whose past runs were done-then-redone (generated
+  by `bin/optimize.mjs --apply-tiers` within human-set bounds). Matching tasks
+  verify at the listed tier or higher.
 - When in doubt, tier up.
 
 ## Token rules (mandatory)
@@ -175,6 +196,22 @@ create directories as needed) — single-line JSON, exactly these fields:
 `verdicts` carries any tier-2 panel results from the run (empty array if none).
 This trace corpus feeds later analysis (pacing stats, eval export) — the format
 is a contract; do not add or rename fields.
+
+## Portfolio mode
+
+`/smartloop portfolio` — drain every non-done run under one shared quota:
+
+1. Get the ordered queue: `node {{REPO}}/hooks/smartloop-sweep.mjs --portfolio`
+   — active runs cheapest-rehydrate-first (smallest journal), `limit-paused`
+   runs deferred to the end.
+2. Work the queue head through the normal 6-step entry (take ownership,
+   triage, execute, verify, checkpoint). One run at a time — never interleave.
+3. When a run parks or blocks, move to the next queue entry instead of
+   sleeping. A limit pause on the *session* parks the whole portfolio (status
+   per run is already checkpointed); a limit-pause on one run's external
+   dependency only defers that run.
+4. Re-run the queue command between items — priorities shift as journals grow.
+5. Stop at queue-empty (notify: portfolio drained) or session limit (park).
 
 ## Backlog mode
 
