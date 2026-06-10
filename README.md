@@ -185,6 +185,30 @@ Rendered agent configs get literal values (agents can't expand references); the 
 
 `global/coordination.md` renders into every agent's instructions, so all of them follow one protocol: claim a GitHub issue (label `agent:claude` / `agent:codex` / `agent:cursor`) before non-trivial work, always work in a dedicated `git worktree`, branch under your namespace (`claude/*`, `codex/*`, `cursor/*`), integrate via PR only. The PR queue serializes conflicts; `git reflog` recovers from branch flips.
 
+Claims are also enforced mechanically: `node hooks/lease-check.mjs claim <scope> --owner <agent>@<machine>` writes a lease file in git (`coordination/leases/`) and exits 2 if someone else holds a live lease. Stale leases expire by timestamp — no daemon. `bin/status.mjs` shows open leases fleet-wide.
+
+</details>
+
+<details>
+<summary><strong>The learning loop (data flows back)</strong></summary>
+
+Once sessions and smartloop runs accumulate, the same files feed improvement — still no
+services, still no LLM calls inside the engine:
+
+- `/rule-mine` — any agent scans memory + telemetry for corrections you had to make repeatedly
+  and proposes the smallest `guardrails.md` edit as a PR. Agent-proposed, human-merged.
+- `node bin/optimize.mjs --pacing` — regenerates `global/addenda/smartloop-pacing.md` with
+  median wall-time/iteration priors from the trace corpus; smartloop consults it at sleep
+  decisions.
+- `node bin/optimize.mjs --regret` — lists runs that were marked done and later redone: the
+  verification that passed them was too weak. Suggestions, not auto-applied (bounded
+  auto-apply ships behind explicit floor/ceiling bounds).
+- `node bin/optimize.mjs --export-dspy` — the corpus as a DSPy-ready dataset. Actually running
+  a prompt optimizer against it is an explicit offline step you invoke with your own key —
+  never part of any hook or render.
+- `/memory-gc` understands decay: facts carry `(confirmed: YYYY-MM-DD)` dates; long-unconfirmed
+  facts get flagged, then pruned on the next pass.
+
 </details>
 
 <details>
