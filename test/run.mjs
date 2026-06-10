@@ -4,9 +4,9 @@
 //   node test/run.mjs        exit 0 = all pass
 import { execFileSync, spawnSync } from 'node:child_process';
 import {
-  cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync,
+  cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync,
 } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { hostname, tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -227,6 +227,135 @@ const t = (name, cond) => {
   t('setup exits 0', r.status === 0);
   t('setup renders configs', existsSync(join(home3, '.claude', 'CLAUDE.md')));
   t('setup prints next steps', r.stdout.includes('Make it yours'));
+}
+
+// 15. Skills render to every agent; `targets:` frontmatter limits the audience
+{
+  render({ SB_FILE_TOKEN: 'x' });
+  t('memory-gc skill renders to claude', existsSync(at('.claude', 'skills', 'memory-gc', 'SKILL.md')));
+  t('memory-gc skill renders to cursor', existsSync(at('.cursor', 'skills', 'memory-gc', 'SKILL.md')));
+  t('memory-gc skill renders to codex prompts', existsSync(at('.codex', 'prompts', 'memory-gc.md')));
+  t('smartloop stays claude-only (targets: claude)',
+    !existsSync(at('.cursor', 'skills', 'smartloop', 'SKILL.md')) && !existsSync(at('.codex', 'prompts', 'smartloop.md')));
+  t('cursor skill carries repo-path substitution', !read(at('.cursor', 'skills', 'memory-gc', 'SKILL.md')).includes('{{REPO}}'));
+}
+
+// 16. sync.mjs appends one telemetry record per session (git-less copy = offline path)
+{
+  const syncRun = (args, input) => spawnSync(process.execPath, [join(repo, 'hooks', 'sync.mjs'), ...args], {
+    env, input, encoding: 'utf8',
+  });
+  const r = syncRun(['--agent', 'claude'], JSON.stringify({ session_id: 'sess-1', cwd: '/some/project' }));
+  t('sync exits 0 without git', r.status === 0);
+  const machine = hostname().split('.')[0];
+  const month = new Date().toISOString().slice(0, 7);
+  const telFile = join(repo, 'telemetry', machine, `${month}.jsonl`);
+  t('telemetry record written', existsSync(telFile));
+  const rec = JSON.parse(read(telFile).trim().split('\n').at(-1));
+  t('record carries agent flag', rec.agent === 'claude');
+  t('record carries session id', rec.session_id === 'sess-1');
+  t('record hashes cwd, not raw path', typeof rec.cwd_hash === 'string' && !JSON.stringify(rec).includes('/some/project'));
+  const r2 = syncRun(['--agent', 'cursor'], 'not json');
+  t('garbage stdin still records (nulls)', r2.status === 0
+    && JSON.parse(read(telFile).trim().split('\n').at(-1)).session_id === null);
+  t('one line per session', read(telFile).trim().split('\n').length === 2);
+}
+
+// 16b. smartloop run-summary format (specified in SKILL.md) round-trips through a parser
+{
+  const sample = { ts: '2026-06-10T12:00:00Z', slug: 'fix-ci', outcome: 'done', iters: 4, wall_s: 1800, verdicts: [] };
+  const dir = join(repo, 'telemetry', 'testbox');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, 'smartloop-runs.jsonl'), `${JSON.stringify(sample)}\n`);
+  const parsed = read(join(dir, 'smartloop-runs.jsonl')).trim().split('\n').map((l) => JSON.parse(l));
+  const KEYS = ['ts', 'slug', 'outcome', 'iters', 'wall_s', 'verdicts'];
+  t('run summary parses with exact contract keys', parsed.length === 1
+    && JSON.stringify(Object.keys(parsed[0]).sort()) === JSON.stringify([...KEYS].sort()));
+  t('skill text pins the same contract keys', KEYS.every((k) => read(join(repo, 'skills', 'smartloop', 'SKILL.md')).includes(`"${k}"`)));
+}
+
+// 17. Telemetry hygiene: --gc rolls old months; current month >1MB warns
+{
+  const dir = join(repo, 'telemetry', 'gcbox');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, '2020-01.jsonl'),
+    '{"ts":"2020-01-01T00:00:00Z","agent":"claude"}\n{"ts":"2020-01-02T00:00:00Z","agent":"codex"}\n');
+  const month = new Date().toISOString().slice(0, 7);
+  writeFileSync(join(dir, `${month}.jsonl`), `${'{"agent":"claude"}'.padEnd(1024, ' ')}\n`.repeat(1100));
+  const r1 = render({ SB_FILE_TOKEN: 'x' });
+  t('oversize current month warns', r1.stdout.includes('exceeds 1MB'));
+  t('plain render leaves old months alone', existsSync(join(dir, '2020-01.jsonl')));
+  const r2 = spawnSync(process.execPath, [join(repo, 'bin', 'render.mjs'), '--gc'], {
+    env: { ...env, SB_FILE_TOKEN: 'x' }, encoding: 'utf8',
+  });
+  t('--gc exits 0', r2.status === 0);
+  t('--gc removes the old month file', !existsSync(join(dir, '2020-01.jsonl')));
+  const archive = JSON.parse(read(join(dir, 'archive.jsonl')).trim());
+  t('--gc archives a per-month summary', archive.month === '2020-01' && archive.sessions === 2 && archive.by_agent.claude === 1);
+  t('--gc spares the current month', existsSync(join(dir, `${month}.jsonl`)));
+  rmSync(join(dir, `${month}.jsonl`)); // don't trip later size warnings
+}
+
+// 18. Codex MCP opt-in: targets ["codex"] merges into ~/.codex/config.toml, section-level
+{
+  writeFileSync(join(repo, 'global', 'mcp.json'), JSON.stringify({
+    mcpServers: {
+      mytool: { targets: ['codex'], command: 'npx', args: ['-y', 'mytool-mcp'], env: { KEY: '${SB_FILE_TOKEN}' } },
+    },
+  }));
+  writeFileSync(at('.codex', 'config.toml'),
+    '[model]\nname = "gpt-5"\n\n[mcp_servers.other]\ncommand = "keep-me"\n');
+  const r = render({ SB_FILE_TOKEN: 'tok123' });
+  t('codex toml render exits 0', r.status === 0);
+  const toml = read(at('.codex', 'config.toml'));
+  t('managed server section added', toml.includes('[mcp_servers.mytool]') && toml.includes('command = "npx"'));
+  t('secrets resolved into toml', toml.includes('KEY = "tok123"'));
+  t('claude-only "type" key dropped', !toml.includes('type ='));
+  t('unmanaged sections preserved', toml.includes('[model]') && toml.includes('name = "gpt-5"') && toml.includes('[mcp_servers.other]'));
+  const r2 = render({ SB_FILE_TOKEN: 'tok123' });
+  t('codex toml merge idempotent', !r2.stdout.includes('config.toml'));
+  const r3 = render({ SB_FILE_TOKEN: 'tok456' });
+  t('changed secret updates managed section in place', read(at('.codex', 'config.toml')).includes('KEY = "tok456"')
+    && !read(at('.codex', 'config.toml')).includes('tok123'));
+}
+
+// 19. Cursor User Rules drift check: nag until --ack-cursor-rules, re-nag on change
+{
+  const renderArgs = (...args) => spawnSync(process.execPath, [join(repo, 'bin', 'render.mjs'), ...args], {
+    env: { ...env, SB_FILE_TOKEN: 'x' }, encoding: 'utf8',
+  });
+  t('unacked rules nag', renderArgs().stdout.includes('cursor-user-rules.md changed'));
+  t('--ack-cursor-rules acknowledges', renderArgs('--ack-cursor-rules').stdout.includes('acknowledged'));
+  t('acked rules are silent', !renderArgs().stdout.includes('cursor-user-rules.md changed'));
+  writeFileSync(join(repo, 'global', 'cursor-user-rules.md'), 'new canonical rules\n');
+  t('edited rules re-nag', renderArgs().stdout.includes('cursor-user-rules.md changed'));
+}
+
+// 20. Managed hook commands upgrade in place (no duplicates when flags change)
+{
+  const oldCmd = `"${process.execPath}" "${join(repo, 'hooks', 'sync.mjs')}"`; // pre-v2 form, no --agent
+  const live = JSON.parse(read(at('.codex', 'hooks.json')));
+  live.hooks.Stop = [{ hooks: [{ type: 'command', command: oldCmd }] }, { hooks: [{ type: 'command', command: 'echo mine' }] }];
+  writeFileSync(at('.codex', 'hooks.json'), JSON.stringify(live, null, 2));
+  render({ SB_FILE_TOKEN: 'x' });
+  const cmds = JSON.parse(read(at('.codex', 'hooks.json'))).hooks.Stop.flatMap((e) => e.hooks ?? []).map((h) => h.command);
+  t('stale managed command replaced', !cmds.includes(oldCmd));
+  t('upgraded command present once', cmds.filter((c) => c.includes('sync.mjs')).length === 1);
+  t('upgraded command carries agent flag', cmds.some((c) => c.includes('--agent codex')));
+  t('user hook untouched by upgrade', cmds.includes('echo mine'));
+}
+
+// 21. Invariants: no services, no LLM APIs anywhere in engine code
+{
+  const forbidden = ['api.openai.com', 'api.anthropic.com', 'convex', 'workos', 'createServer', '.listen('];
+  let clean = true;
+  for (const dir of ['bin', 'hooks']) {
+    for (const f of readdirSync(join(repo, dir))) {
+      const src = read(join(repo, dir, f)).toLowerCase();
+      if (forbidden.some((p) => src.includes(p))) clean = false;
+    }
+  }
+  t('engine code is service- and LLM-free', clean);
 }
 
 rmSync(work, { recursive: true, force: true });

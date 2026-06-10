@@ -45,6 +45,8 @@ Edit these files, then run `node bin/render.mjs` to apply:
 | `global/coordination.md` | How multiple agents avoid stepping on each other |
 | `global/mcp.json` | The MCP servers (tools) your agents can use |
 | `global/addenda/*.md` | Extra instructions, one topic per file |
+| `global/cursor-user-rules.md` | Paste source for Cursor's global User Rules (render nags on drift) |
+| `skills/*/SKILL.md` | Skills, rendered to every agent (`targets:` frontmatter narrows the audience) |
 | `memory/MEMORY.md` | Shared memory — your agents maintain this themselves |
 
 Always edit these files — never the rendered copies (those carry a "generated" marker and get overwritten).
@@ -71,11 +73,12 @@ Everything below is detail — click to expand.
 | Surface | Claude Code | Codex | Cursor |
 |---|---|---|---|
 | Global instructions | `~/.claude/CLAUDE.md` | `~/.codex/AGENTS.md` | per-repo `.cursor/rules` (see limits) |
-| MCP servers | `~/.claude.json` (merge-only) | unmanaged by default¹ | `~/.cursor/mcp.json` (owned) |
+| MCP servers | `~/.claude.json` (merge-only) | `~/.codex/config.toml` (opt-in¹, merge-only) | `~/.cursor/mcp.json` (owned) |
+| Skills | `~/.claude/skills/*` | `~/.codex/prompts/*` | `~/.cursor/skills/*` |
 | Memory recall (session start) | `SessionStart` hook | `SessionStart` hook | `sessionStart` hook |
-| Memory persist (session end) | `SessionEnd` hook | `Stop` hook | `stop` hook |
+| Memory persist + telemetry (session end) | `SessionEnd` hook | `Stop` hook | `stop` hook |
 
-¹ Codex loads every configured MCP server into memory; keeping `config.toml` lean is deliberate. Add a renderer target if you want it managed.
+¹ Codex loads every configured MCP server into memory; keeping `config.toml` lean is deliberate. Only servers that list `"codex"` in `targets` are rendered there.
 
 Also covered, automatically detected (rendered only if the agent's directory exists):
 
@@ -101,7 +104,7 @@ Why this beats an MCP memory server:
 - **Zero infrastructure.** No embedding API, no vector store, no daemon eating RAM. Git is the sync protocol, the history, and the backup.
 - **You own it.** Plain markdown, versioned, greppable, editable, portable.
 
-Discipline: one line per fact, cap the index at ~120 lines, prune stale facts. The index is a per-session token tax — keep it cheap. (The recall hook warns the agent automatically when the index goes over the cap.)
+Discipline: one line per fact, cap the index at ~120 lines, prune stale facts. The index is a per-session token tax — keep it cheap. (The recall hook warns the agent automatically when the index goes over the cap, and the `/memory-gc` skill walks any agent through deduping, rolling detail into topics, and pruning — proposing a diff, never committing it.)
 
 </details>
 
@@ -123,6 +126,23 @@ start until you mark them `done` or delete `~/.smartloop/<slug>/` — that is
 "needs attention" semantics doing its job. And removing a skill from `skills/`
 does not delete its published copy under `~/.claude/skills/` (the engine merges,
 never deletes) — remove the published directory by hand if you retire one.
+
+</details>
+
+<details>
+<summary><strong>Session telemetry</strong></summary>
+
+The session-end sync hook appends one JSONL record per session to
+`telemetry/<machine>/<YYYY-MM>.jsonl` — timestamp, agent, machine, session id, a hash of the
+working directory (never the raw path), and duration where the agent provides it. Records sync
+between machines with the same git push/pull as memory. No tokens are spent and no service is
+involved; it's a file append.
+
+This is the raw material for dashboards, eval datasets, and (later) tuning — and it stays in
+*your* repo. The public template ships `telemetry/` empty; your instance commits its own data,
+which is one more reason instances should be private. Hygiene: render warns when the current
+month exceeds 1MB; `node bin/render.mjs --gc` rolls months older than 3 into one-line summaries
+in `archive.jsonl`. smartloop runs add a summary record per finished run (`smartloop-runs.jsonl`).
 
 </details>
 
@@ -175,7 +195,7 @@ Tests live in `test/run.mjs` (no framework, no deps) and run on Linux/macOS/Wind
 
 Some surfaces are vendor-locked and cannot be file-synced; know them rather than fight them:
 
-- **Cursor global User Rules** live only in the IDE's settings database (no file API). Keep them as a paste of `guardrails.md`; per-repo `.cursor/rules/*.mdc` carry the rest.
+- **Cursor global User Rules** live only in the IDE's settings database (no file API). Keep `global/cursor-user-rules.md` as the canonical paste source — render nags when it changes until you re-paste and run `node bin/render.mjs --ack-cursor-rules`. Per-repo `.cursor/rules/*.mdc` carry the rest.
 - **claude.ai OAuth connectors and Claude Code plugins** are account/installation state, not files.
 - **Per-repo configs** (project AGENTS.md / CLAUDE.md / `.cursor/rules`) belong in each project's repo — samebrain handles the global layer only.
 

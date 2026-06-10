@@ -1,6 +1,7 @@
 ---
 name: smartloop
 description: Run any task as a token-optimized, verification-tiered, self-pacing loop with durable state. Use on /smartloop <task>, /smartloop resume [slug], /smartloop status, /smartloop backlog <source>.
+targets: claude
 ---
 
 # smartloop
@@ -17,7 +18,9 @@ limits never lose work. The conversation is scratch; the state file is memory.
 - `/smartloop <task>` — start (slug = short kebab-case from the task)
 - `/smartloop resume [slug]` — re-enter a run; with no slug and exactly one
   non-done run, resume that one; otherwise list and ask
-- `/smartloop status` — print one line per run from the state files; nothing else
+- `/smartloop status` — print one line per run from the state files; when
+  `{{REPO}}/telemetry/*/smartloop-runs.jsonl` has a record for a slug, append
+  its cost line (iters, wall time, outcome); nothing else
 - `/smartloop backlog <source>` — queue-draining mode (below)
 
 ## State file format
@@ -48,6 +51,11 @@ checked off, each with an evidence pointer. Journal entries ≤3 lines, pointers
 never payloads. A Stop hook audits `next_wake`: ending a turn with a
 non-terminal run and no live wake (and not `parked`) is blocked. The audit
 only protects the session named in `owner_session`.
+
+The front matter is a machine-parseable contract: exactly the keys
+`slug`, `status`, `owner_session`, `next_wake` (when applicable), one
+`key: value` per line, no nesting, no extra keys. Tooling parses it; prose
+belongs in the body.
 
 ## Every entry — start, wake, or resume — runs the same 6 steps
 
@@ -131,6 +139,18 @@ via `/smartloop resume` — the SessionStart sweep surfaces it automatically.
 Verify every criterion goal-backward against the Contract — against what was
 promised, not what was done. Set status `done`, final journal entry, send a
 one-line notification (done / blocked-on-user / limit-paused), no wake.
+
+Then append one run-summary line to
+`{{REPO}}/telemetry/<machine>/smartloop-runs.jsonl` (machine = short hostname;
+create directories as needed) — single-line JSON, exactly these fields:
+
+```
+{"ts":"<iso8601>","slug":"<slug>","outcome":"done|blocked|abandoned","iters":<n>,"wall_s":<seconds from first journal entry to now>,"verdicts":[]}
+```
+
+`verdicts` carries any tier-2 panel results from the run (empty array if none).
+This trace corpus feeds later analysis (pacing stats, eval export) — the format
+is a contract; do not add or rename fields.
 
 ## Backlog mode
 
