@@ -36,9 +36,10 @@ if (existsSync(telemetryRoot)) {
           }
         }
       } else if (f === 'smartloop-runs.jsonl') {
-        for (const run of jsonl(join(dir, f))) runs.push({ machine, source: 'smartloop', ...run });
+        // tags last: a stray machine/source field in a record must not clobber them
+        for (const run of jsonl(join(dir, f))) runs.push({ ...run, machine, source: 'smartloop' });
       } else if (f === 'fleet-runs.jsonl') {
-        for (const run of jsonl(join(dir, f))) runs.push({ machine, source: 'fleet', ...run });
+        for (const run of jsonl(join(dir, f))) runs.push({ ...run, machine, source: 'fleet' });
       }
     }
   }
@@ -72,7 +73,10 @@ try {
   }
 }
 
-const data = { generated: new Date().toISOString(), months, runs, memory, rules };
+// Newest-first, capped: fleet appends one line per terminal task, so the corpus outgrows
+// what a single inlined HTML table should carry long before the files need rotating.
+runs.sort((a, b) => (b.ts ?? '').localeCompare(a.ts ?? ''));
+const data = { generated: new Date().toISOString(), months, runs: runs.slice(0, 500), memory, rules };
 
 // ---- render ----------------------------------------------------------------------------
 const html = `<!doctype html>
@@ -91,7 +95,7 @@ const html = `<!doctype html>
 <h2>Memory index health</h2><div id="memory"></div>
 <h2>Rule effectiveness</h2><div id="rules"></div>
 <script>
-const data = ${JSON.stringify(data)};
+const data = ${JSON.stringify(data).replace(/</g, '\\u003c')};
 document.getElementById('gen').textContent = data.generated;
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 {

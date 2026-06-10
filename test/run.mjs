@@ -359,7 +359,7 @@ const t = (name, cond) => {
     '{"ts":"2026-06-10T04:00:00Z","slug":"dash-run","outcome":"done","iters":3,"wall_s":600,"verdicts":[{"lens":"security","verdict":"pass","reason":"ok"}]}\n');
   writeFileSync(join(dir, 'fleet-runs.jsonl'),
     '{"ts":"2026-06-10T05:00:00Z","slug":"fleet-task-1","repo":"demo","title":"T","vendor":"claude","outcome":"done","cost_usd":0,"verify_ok":true}\n'
-    + '{"ts":"2026-06-10T06:00:00Z","slug":"fleet-task-1","repo":"demo","title":"T","vendor":"claude","outcome":"done","cost_usd":0,"verify_ok":true}\n');
+    + '{"ts":"2026-06-10T06:00:00Z","slug":"fleet-task-1","repo":"demo","title":"x</script><b>boom","vendor":"claude","outcome":"done","cost_usd":0,"verify_ok":true}\n');
   const r = spawnSync(process.execPath, [join(repo, 'bin', 'dashboard.mjs')], { env, encoding: 'utf8' });
   t('dashboard exits 0', r.status === 0);
   const html = read(join(repo, 'dashboard.html'));
@@ -368,6 +368,7 @@ const t = (name, cond) => {
   t('dashboard lists smartloop runs with verdicts', html.includes('dash-run') && html.includes('security'));
   t('dashboard lists fleet runs with source tag', html.includes('fleet-task-1') && html.includes('"source":"fleet"'));
   t('fleet re-runs do not count as smartloop regret', html.includes('"regrets":0'));
+  t('telemetry strings cannot break out of the inline script', html.split('</script>').length === 2);
   t('dashboard reports memory health', html.includes('Memory index health'));
   t('dashboard.html is gitignored', read(join(repo, '.gitignore')).includes('dashboard.html'));
 }
