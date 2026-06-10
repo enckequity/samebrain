@@ -142,6 +142,36 @@ const t = (name, cond) => {
   t('copilot skipped when absent', !existsSync(join(home2, '.copilot', 'instructions', 'samebrain.instructions.md')));
 }
 
+// 11. smartloop-stop: dead-man fires only for owned, non-terminal, wake-less runs
+{
+  const sl = join(work, 'smartloop');
+  const mkRun = (slug, fm) => {
+    mkdirSync(join(sl, slug), { recursive: true });
+    writeFileSync(join(sl, slug, 'state.md'),
+      `---\n${Object.entries(fm).map(([k, v]) => `${k}: ${v}`).join('\n')}\n---\n## Contract\n`);
+  };
+  mkRun('dead-run', { slug: 'dead-run', status: 'working', owner_session: 's1' });
+  mkRun('sleeping', { slug: 'sleeping', status: 'waiting:ci', owner_session: 's1', next_wake: '2099-01-01T00:00:00Z' });
+  // slug deliberately != 'parked': the hook's stderr guidance names the sentinel value
+  mkRun('paused', { slug: 'paused', status: 'waiting:user', owner_session: 's1', next_wake: 'parked' });
+  mkRun('finished', { slug: 'finished', status: 'done', owner_session: 's1' });
+  const stop = (payload) => spawnSync(process.execPath, [join(repo, 'hooks', 'smartloop-stop.mjs')], {
+    env: { ...env, SMARTLOOP_DIR: sl }, input: JSON.stringify(payload), encoding: 'utf8',
+  });
+  const r1 = stop({ session_id: 's1' });
+  t('dead run blocks stop (exit 2)', r1.status === 2);
+  t('stderr names the run', r1.stderr.includes('dead-run'));
+  t('stderr spares sleeping/parked/done', !r1.stderr.includes('sleeping') && !r1.stderr.includes('paused') && !r1.stderr.includes('finished'));
+  t('other session unaffected', stop({ session_id: 's2' }).status === 0);
+  t('stop_hook_active passes through', stop({ session_id: 's1', stop_hook_active: true }).status === 0);
+  t('no state dir is silent', spawnSync(process.execPath, [join(repo, 'hooks', 'smartloop-stop.mjs')], {
+    env: { ...env, SMARTLOOP_DIR: join(work, 'absent') }, input: '{"session_id":"s1"}', encoding: 'utf8',
+  }).status === 0);
+  t('garbage stdin is silent', spawnSync(process.execPath, [join(repo, 'hooks', 'smartloop-stop.mjs')], {
+    env: { ...env, SMARTLOOP_DIR: sl }, input: 'not json', encoding: 'utf8',
+  }).status === 0);
+}
+
 rmSync(work, { recursive: true, force: true });
 console.log(failures ? `\n${failures} failure(s)` : '\nall tests passed');
 process.exit(failures ? 1 : 0);
