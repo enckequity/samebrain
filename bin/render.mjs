@@ -1,26 +1,32 @@
 #!/usr/bin/env node
 // Render canonical agent config to per-agent global files on THIS machine. Idempotent.
-//   node bin/render.mjs            apply
-//   node bin/render.mjs --check    report drift, write nothing
+//   node bin/render.mjs                     apply
+//   node bin/render.mjs --check             report drift, write nothing
+//   node bin/render.mjs --gc                roll telemetry months older than 3 into archive lines
+//   node bin/render.mjs --ack-cursor-rules  record that Cursor User Rules match global/cursor-user-rules.md
 //
 // Owns (full render, backup once):  ~/.codex/AGENTS.md, ~/.claude/CLAUDE.md, ~/.cursor/mcp.json,
-//                                   ~/.claude/skills/*
+//                                   ~/.claude/skills/*, ~/.cursor/skills/*, ~/.codex/prompts/*
 // Merges (non-destructive):         ~/.claude.json mcpServers, ~/.claude/settings.json hooks,
-//                                   ~/.codex/hooks.json, ~/.cursor/hooks.json
+//                                   ~/.codex/hooks.json, ~/.cursor/hooks.json,
+//                                   ~/.codex/config.toml mcp_servers (opt-in)
 //
 // Secrets: string values in global/mcp.json may use ${ENV_VAR} (resolved from the environment)
 // or op://vault/item/field (resolved via the 1Password CLI). Never commit raw secrets.
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import {
-  copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync,
+  copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync,
 } from 'node:fs';
 import { homedir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const HOME = homedir();
 const CHECK = process.argv.includes('--check');
+const GC = process.argv.includes('--gc');
+const ACK = process.argv.includes('--ack-cursor-rules');
 const read = (p) => readFileSync(p, 'utf8');
 const stripBom = (s) => (s.charCodeAt(0) === 0xFEFF ? s.slice(1) : s); // tolerate editor BOMs
 const readJson = (p) => JSON.parse(stripBom(read(p)));
@@ -172,11 +178,55 @@ writeIfChanged(
   }
 }
 
+// 3c. Codex: opt-in — servers listing "codex" in targets merge into ~/.codex/config.toml
+// [mcp_servers.*]. Section-level merge: only sections samebrain renders are touched.
+{
+  const servers = wanted('codex');
+  if (Object.keys(servers).length > 0) {
+    const tomlValue = (v) => {
+      if (typeof v === 'string') return JSON.stringify(v);
+      if (Array.isArray(v)) return `[${v.map(tomlValue).join(', ')}]`;
+      if (v && typeof v === 'object') {
+        return `{ ${Object.entries(v).map(([k, x]) => `${k} = ${tomlValue(x)}`).join(', ')} }`;
+      }
+      return JSON.stringify(v);
+    };
+    const tomlSection = (name, def) => {
+      const { type, ...rest } = def; // "type" is a claude/cursor concept; codex infers transport
+      const lines = Object.entries(rest)
+        .filter(([, v]) => v !== undefined && v !== null)
+        .map(([k, v]) => `${k} = ${tomlValue(v)}`);
+      return `[mcp_servers.${name}]\n${lines.join('\n')}\n`;
+    };
+    const upsertSection = (content, name, section) => {
+      // Replace from the section header to the next top-level header (or EOF).
+      const re = new RegExp(`(^|\\n)\\[mcp_servers\\.${name.replaceAll('.', '\\.')}\\][^\\n]*\\n(?:(?!\\[)[^\\n]*\\n?)*`);
+      if (re.test(content)) return content.replace(re, (m, lead) => `${lead}${section}`);
+      return content === '' ? section : `${content.replace(/\n*$/, '\n\n')}${section}`;
+    };
+    const target = join(HOME, '.codex', 'config.toml');
+    const live = existsSync(target) ? read(target) : '';
+    let next = live;
+    for (const [name, def] of Object.entries(servers)) next = upsertSection(next, name, tomlSection(name, def));
+    if (next !== live) {
+      changes.push('codex: ~/.codex/config.toml mcp_servers (merge)');
+      if (!CHECK) {
+        backupOnce(target);
+        mkdirSync(dirname(target), { recursive: true });
+        writeFileSync(target, next);
+      }
+    }
+  }
+}
+
 // ---- 4. Memory hooks ----------------------------------------------------------------
 const node = process.execPath; // absolute node path — hooks run outside any shell profile
 const recall = join(ROOT, 'hooks', 'recall.mjs');
 const sync = join(ROOT, 'hooks', 'sync.mjs');
 const cmd = (script, flag = '') => `"${node}" "${script}"${flag ? ` ${flag}` : ''}`;
+// A hook command is "ours" if it runs a script of the same filename — lets a render
+// upgrade a managed command in place (e.g. adding flags) without duplicating it.
+const managesScript = (command, script) => new RegExp(`[\\\\/]${basename(script).replaceAll('.', '\\.')}"`).test(command);
 
 function mergeJsonFile(target, label, mutate) {
   const live = existsSync(target) ? readJson(target) : {};
@@ -190,58 +240,70 @@ function mergeJsonFile(target, label, mutate) {
   writeFileSync(target, `${JSON.stringify(next, null, 2)}\n`);
 }
 
+// Nested {hooks:[{command}]} ensure (Claude/Codex shape): prune stale managed variants
+// of the same script, then add if absent.
+const ensureNested = (s, event, command, script, mkEntry) => {
+  s.hooks[event] ??= [];
+  for (const entry of s.hooks[event]) {
+    if (entry.hooks) entry.hooks = entry.hooks.filter((h) => h.command === command || !managesScript(h.command, script));
+  }
+  s.hooks[event] = s.hooks[event].filter((e) => !e.hooks || e.hooks.length > 0);
+  const all = s.hooks[event].flatMap((e) => e.hooks ?? []);
+  if (!all.some((h) => h.command === command)) s.hooks[event].push(mkEntry(command));
+};
+
 // 4a. Claude Code (~/.claude/settings.json) — append-if-absent, preserve existing hooks
 mergeJsonFile(join(HOME, '.claude', 'settings.json'), 'claude: settings.json memory hooks', (s) => {
   s.hooks ??= {};
-  const ensure = (event, command) => {
-    s.hooks[event] ??= [];
-    const all = s.hooks[event].flatMap((e) => e.hooks ?? []);
-    if (!all.some((h) => h.command === command)) {
-      s.hooks[event].push({ matcher: '', hooks: [{ type: 'command', command }] });
-    }
-  };
-  ensure('SessionStart', cmd(recall));
-  ensure('SessionEnd', cmd(sync));
+  const entry = (command) => ({ matcher: '', hooks: [{ type: 'command', command }] });
+  ensureNested(s, 'SessionStart', cmd(recall), recall, entry);
+  ensureNested(s, 'SessionEnd', cmd(sync, '--agent claude'), sync, entry);
 });
 
 // 4b. Codex (~/.codex/hooks.json)
 mergeJsonFile(join(HOME, '.codex', 'hooks.json'), 'codex: hooks.json memory hooks', (s) => {
   s.hooks ??= {};
-  const ensure = (event, command) => {
-    s.hooks[event] ??= [];
-    const all = s.hooks[event].flatMap((e) => e.hooks ?? []);
-    if (!all.some((h) => h.command === command)) {
-      s.hooks[event].push({ hooks: [{ type: 'command', command }] });
-    }
-  };
-  ensure('SessionStart', cmd(recall));
-  ensure('Stop', cmd(sync));
+  const entry = (command) => ({ hooks: [{ type: 'command', command }] });
+  ensureNested(s, 'SessionStart', cmd(recall), recall, entry);
+  ensureNested(s, 'Stop', cmd(sync, '--agent codex'), sync, entry);
 });
 
 // 4c. Cursor (~/.cursor/hooks.json) — flat {command} entries
 mergeJsonFile(join(HOME, '.cursor', 'hooks.json'), 'cursor: hooks.json memory hooks', (s) => {
   s.version ??= 1;
   s.hooks ??= {};
-  const ensure = (event, command) => {
+  const ensure = (event, command, script) => {
     s.hooks[event] ??= [];
+    s.hooks[event] = s.hooks[event].filter((h) => h.command === command || !managesScript(h.command, script));
     if (!s.hooks[event].some((h) => h.command === command)) s.hooks[event].push({ command });
   };
-  ensure('sessionStart', cmd(recall, '--cursor'));
-  ensure('stop', cmd(sync));
+  ensure('sessionStart', cmd(recall, '--cursor'), recall);
+  ensure('stop', cmd(sync, '--agent cursor'), sync);
 });
 
-// ---- 5. Skills + liveness hooks (Claude Code only) -----------------------------------
+// ---- 5. Skills (all agents) + liveness hooks ------------------------------------------
+// Optional `targets:` line in a skill's frontmatter limits which agents receive it
+// (e.g. `targets: claude`). Default: claude, cursor, codex.
 {
   const skillsDir = join(ROOT, 'skills');
   if (existsSync(skillsDir)) {
     for (const name of readdirSync(skillsDir)) {
       const src = join(skillsDir, name, 'SKILL.md');
       if (!existsSync(src)) continue;
-      writeIfChanged(
-        join(HOME, '.claude', 'skills', name, 'SKILL.md'),
-        `${md(src)}\n\n<!-- rendered by samebrain (bin/render.mjs) — edit skills/${name}/SKILL.md in the repo, not here -->\n`,
-        `claude: ~/.claude/skills/${name}/SKILL.md`,
-      );
+      const body = md(src);
+      const fm = body.match(/^---\n([\s\S]*?)\n---/);
+      const targetsLine = fm?.[1].match(/^targets:\s*(.+)$/m)?.[1];
+      const targets = targetsLine ? targetsLine.split(/[,\s]+/).filter(Boolean) : ['claude', 'cursor', 'codex'];
+      const out = `${body}\n\n<!-- rendered by samebrain (bin/render.mjs) — edit skills/${name}/SKILL.md in the repo, not here -->\n`;
+      if (targets.includes('claude')) {
+        writeIfChanged(join(HOME, '.claude', 'skills', name, 'SKILL.md'), out, `claude: ~/.claude/skills/${name}/SKILL.md`);
+      }
+      if (targets.includes('cursor')) {
+        writeIfChanged(join(HOME, '.cursor', 'skills', name, 'SKILL.md'), out, `cursor: ~/.cursor/skills/${name}/SKILL.md`);
+      }
+      if (targets.includes('codex')) {
+        writeIfChanged(join(HOME, '.codex', 'prompts', `${name}.md`), out, `codex: ~/.codex/prompts/${name}.md`);
+      }
     }
   }
 }
@@ -257,6 +319,63 @@ mergeJsonFile(join(HOME, '.claude', 'settings.json'), 'claude: settings.json sma
   ensure('SessionStart', cmd(join(ROOT, 'hooks', 'smartloop-sweep.mjs')));
   ensure('Stop', cmd(join(ROOT, 'hooks', 'smartloop-stop.mjs')));
 });
+
+// ---- 6. Telemetry hygiene -------------------------------------------------------------
+// telemetry/<machine>/<YYYY-MM>.jsonl is appended by hooks/sync.mjs. Warn when the
+// current month grows past 1MB; --gc rolls months older than 3 into archive.jsonl.
+{
+  const telemetryRoot = join(ROOT, 'telemetry');
+  if (existsSync(telemetryRoot)) {
+    const cutoff = new Date();
+    cutoff.setMonth(cutoff.getMonth() - 3);
+    const cutoffMonth = cutoff.toISOString().slice(0, 7);
+    const thisMonth = new Date().toISOString().slice(0, 7);
+    for (const machine of readdirSync(telemetryRoot)) {
+      const dir = join(telemetryRoot, machine);
+      let files;
+      try { files = readdirSync(dir).filter((f) => /^\d{4}-\d{2}\.jsonl$/.test(f)); } catch { continue; }
+      for (const file of files) {
+        const month = file.slice(0, 7);
+        const path = join(dir, file);
+        if (month === thisMonth && statSync(path).size > 1024 * 1024) {
+          console.log(`render: telemetry ${machine}/${file} exceeds 1MB — run: node bin/render.mjs --gc`);
+        }
+        if (GC && month < cutoffMonth && !CHECK) {
+          const byAgent = {};
+          let sessions = 0;
+          for (const line of read(path).split('\n').filter(Boolean)) {
+            try {
+              const rec = JSON.parse(line);
+              sessions += 1;
+              byAgent[rec.agent ?? 'unknown'] = (byAgent[rec.agent ?? 'unknown'] ?? 0) + 1;
+            } catch { /* unparseable line — counted nowhere */ }
+          }
+          const summary = JSON.stringify({ month, machine, sessions, by_agent: byAgent });
+          writeFileSync(join(dir, 'archive.jsonl'), `${existsSync(join(dir, 'archive.jsonl')) ? read(join(dir, 'archive.jsonl')) : ''}${summary}\n`);
+          rmSync(path);
+          changes.push(`telemetry: rolled ${machine}/${file} into archive.jsonl`);
+        }
+      }
+    }
+  }
+}
+
+// ---- 7. Cursor User Rules drift check ---------------------------------------------------
+// Cursor's global User Rules live in its settings DB (no file API). global/cursor-user-rules.md
+// is the canonical paste source; nag whenever it changes until the paste is acknowledged.
+{
+  const src = join(ROOT, 'global', 'cursor-user-rules.md');
+  if (existsSync(src)) {
+    const hash = createHash('sha256').update(read(src)).digest('hex').slice(0, 16);
+    const ackFile = join(ROOT, '.cursor-rules-ack');
+    if (ACK) {
+      writeFileSync(ackFile, `${hash}\n`);
+      console.log('render: Cursor User Rules paste acknowledged');
+    } else if (!existsSync(ackFile) || read(ackFile).trim() !== hash) {
+      console.log('render: global/cursor-user-rules.md changed — paste it into Cursor Settings > Rules > User Rules, then run: node bin/render.mjs --ack-cursor-rules');
+    }
+  }
+}
 
 // ---- report -------------------------------------------------------------------------
 if (changes.length === 0) {
