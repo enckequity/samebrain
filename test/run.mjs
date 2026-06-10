@@ -357,12 +357,17 @@ const t = (name, cond) => {
   writeFileSync(join(dir, 'archive.jsonl'), '{"month":"2025-01","machine":"dashbox","sessions":7,"by_agent":{"cursor":7}}\n');
   writeFileSync(join(dir, 'smartloop-runs.jsonl'),
     '{"ts":"2026-06-10T04:00:00Z","slug":"dash-run","outcome":"done","iters":3,"wall_s":600,"verdicts":[{"lens":"security","verdict":"pass","reason":"ok"}]}\n');
+  writeFileSync(join(dir, 'fleet-runs.jsonl'),
+    '{"ts":"2026-06-10T05:00:00Z","slug":"fleet-task-1","repo":"demo","title":"T","vendor":"claude","outcome":"done","cost_usd":0,"verify_ok":true}\n'
+    + '{"ts":"2026-06-10T06:00:00Z","slug":"fleet-task-1","repo":"demo","title":"T","vendor":"claude","outcome":"done","cost_usd":0,"verify_ok":true}\n');
   const r = spawnSync(process.execPath, [join(repo, 'bin', 'dashboard.mjs')], { env, encoding: 'utf8' });
   t('dashboard exits 0', r.status === 0);
   const html = read(join(repo, 'dashboard.html'));
   t('dashboard inlines sessions per machine/agent', html.includes('dashbox') && html.includes(`"${month}"`));
   t('dashboard includes archived months', html.includes('2025-01'));
   t('dashboard lists smartloop runs with verdicts', html.includes('dash-run') && html.includes('security'));
+  t('dashboard lists fleet runs with source tag', html.includes('fleet-task-1') && html.includes('"source":"fleet"'));
+  t('fleet re-runs do not count as smartloop regret', html.includes('"regrets":0'));
   t('dashboard reports memory health', html.includes('Memory index health'));
   t('dashboard.html is gitignored', read(join(repo, '.gitignore')).includes('dashboard.html'));
 }
@@ -402,6 +407,7 @@ const t = (name, cond) => {
   t('status exits 0 without git history', r.status === 0);
   t('status lists machines with session counts', r.stdout.includes('machine dashbox: 3 session(s)'));
   t('status summarizes smartloop runs', /smartloop: \d+ run\(s\) recorded/.test(r.stdout));
+  t('status summarizes fleet runs', /fleet: \d+ run\(s\) recorded/.test(r.stdout));
   t('status shows live lease', r.stdout.includes('lease repo-x: held by claude@dashbox'));
   t('status flags expired lease', r.stdout.includes('lease repo-y: EXPIRED'));
   rmSync(leases, { recursive: true }); // v3 only reads leases; fixtures shouldn't leak into later renders
