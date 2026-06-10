@@ -92,6 +92,19 @@ if (existsSync(join(HOME, '.copilot'))) {
 }
 
 // ---- 3. MCP ------------------------------------------------------------------------
+// Optional machine-local secrets file (gitignored): KEY=VALUE lines feed ${VAR} refs.
+// Process env wins over the file so one-off overrides stay possible.
+const localSecrets = {};
+{
+  const secretsFile = join(ROOT, 'secrets.env');
+  if (existsSync(secretsFile)) {
+    for (const line of read(secretsFile).split('\n')) {
+      const m = line.match(/^\s*([A-Za-z0-9_]+)\s*=\s*(.*?)\s*$/);
+      if (m && !line.trim().startsWith('#')) localSecrets[m[1]] = m[2];
+    }
+  }
+}
+
 const opCache = new Map();
 const opRead = (ref) => {
   if (!opCache.has(ref)) {
@@ -106,9 +119,9 @@ const opRead = (ref) => {
 function resolveSecrets(value, server) {
   if (typeof value === 'string') {
     const expanded = value.replaceAll(/\$\{([A-Za-z0-9_]+)\}/g, (_, name) => {
-      const v = process.env[name];
+      const v = process.env[name] ?? localSecrets[name];
       if (v === undefined) {
-        fail(`mcp server "${server}": \${${name}} is not set in the environment`);
+        fail(`mcp server "${server}": \${${name}} is not set (environment or secrets.env)`);
       }
       return v;
     });
