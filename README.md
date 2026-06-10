@@ -106,6 +106,27 @@ Discipline: one line per fact, cap the index at ~120 lines, prune stale facts. T
 </details>
 
 <details>
+<summary><strong>smartloop: a token-frugal loop for Claude Code</strong></summary>
+
+`/smartloop <task>` runs any task as a self-pacing loop with durable state
+(`~/.smartloop/<slug>/state.md`, override with `SMARTLOOP_DIR`): contract-first
+success criteria, tiered verification, subagent context firewalls, cache-aware
+wake pacing, and park/resume across rate limits. Two liveness hooks make silent
+loop death impossible — a Stop dead-man check blocks ending a session that owns
+a run with no scheduled wake, and a session-start sweep surfaces orphaned or
+parked runs (printing nothing when there are none). Claude Code only; design
+rationale in `docs/plans/2026-06-10-smartloop-design.md`. The skill ships in
+`skills/smartloop/` and renders to `~/.claude/skills/` like every other target.
+
+Two lifecycle notes: runs with status `blocked:*` keep appearing at session
+start until you mark them `done` or delete `~/.smartloop/<slug>/` — that is
+"needs attention" semantics doing its job. And removing a skill from `skills/`
+does not delete its published copy under `~/.claude/skills/` (the engine merges,
+never deletes) — remove the published directory by hand if you retire one.
+
+</details>
+
+<details>
 <summary><strong>Secrets</strong></summary>
 
 String values in `global/mcp.json` support two reference forms, resolved at render time:

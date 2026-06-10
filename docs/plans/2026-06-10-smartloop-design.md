@@ -39,9 +39,10 @@ Three pieces, no code beyond two small hook scripts:
      `working|waiting` and no live `next_wake` → exit 2: "run X is non-terminal:
      schedule a wakeup or mark it done/blocked with evidence." Silent loop death
      becomes impossible.
-   - **SessionStart orphan sweep** — list runs with non-terminal status and
-     stale `next_wake` (process died, machine rebooted): "orphaned loop:
-     `/smartloop resume <slug>`".
+   - **SessionStart orphan sweep** — list non-`done` runs without a live
+     `next_wake` (stale wake from a dead process, parked, limit-paused,
+     blocked): "orphaned loop: `/smartloop resume <slug>`". Runs sleeping on a
+     live future wake are spared — listing them would invite a second writer.
 
 ### Invocation surface
 
@@ -59,7 +60,7 @@ Three pieces, no code beyond two small hook scripts:
 slug: <task-slug>
 status: working | waiting:<what> | limit-paused | done | blocked:<needs-user>
 owner_session: <session-id>
-next_wake: <iso8601 | none>
+next_wake: <iso8601 when sleeping | parked on deliberate park | omitted otherwise>
 ---
 ## Contract            (written by iteration 0; never edited, only marked verified)
 Goal: <one line>

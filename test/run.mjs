@@ -142,7 +142,82 @@ const t = (name, cond) => {
   t('copilot skipped when absent', !existsSync(join(home2, '.copilot', 'instructions', 'samebrain.instructions.md')));
 }
 
-// 11. setup.mjs = render + friendly summary (hook step degrades outside a git clone)
+// 11. smartloop-stop: dead-man fires only for owned, non-terminal, wake-less runs
+{
+  const sl = join(work, 'smartloop');
+  const mkRun = (slug, fm) => {
+    mkdirSync(join(sl, slug), { recursive: true });
+    writeFileSync(join(sl, slug, 'state.md'),
+      `---\n${Object.entries(fm).map(([k, v]) => `${k}: ${v}`).join('\n')}\n---\n## Contract\n`);
+  };
+  mkRun('dead-run', { slug: 'dead-run', status: 'working', owner_session: 's1' });
+  mkRun('sleeping', { slug: 'sleeping', status: 'waiting:ci', owner_session: 's1', next_wake: '2099-01-01T00:00:00Z' });
+  // slug deliberately != 'parked': the hook's stderr guidance names the sentinel value
+  mkRun('paused', { slug: 'paused', status: 'waiting:user', owner_session: 's1', next_wake: 'parked' });
+  mkRun('finished', { slug: 'finished', status: 'done', owner_session: 's1' });
+  mkRun('overdue', { slug: 'overdue', status: 'waiting:wake', owner_session: 's1', next_wake: '2020-01-01T00:00:00Z' });
+  mkRun('dirwins', { slug: 'imposter', status: 'working', owner_session: 's1' });
+  mkdirSync(join(sl, 'malformed'), { recursive: true });
+  writeFileSync(join(sl, 'malformed', 'state.md'), 'no frontmatter here');
+  mkdirSync(join(sl, 'brokendir', 'state.md'), { recursive: true }); // unreadable: state.md is a directory
+  const stop = (payload) => spawnSync(process.execPath, [join(repo, 'hooks', 'smartloop-stop.mjs')], {
+    env: { ...env, SMARTLOOP_DIR: sl }, input: JSON.stringify(payload), encoding: 'utf8',
+  });
+  const r1 = stop({ session_id: 's1' });
+  t('dead run blocks stop (exit 2)', r1.status === 2);
+  t('stderr names the run', r1.stderr.includes('dead-run'));
+  t('stderr spares sleeping/parked/done', !r1.stderr.includes('sleeping') && !r1.stderr.includes('paused') && !r1.stderr.includes('finished'));
+  t('expired wake blocks too', r1.status === 2 && r1.stderr.includes('overdue'));
+  t('malformed state.md skipped silently', !r1.stderr.includes('malformed'));
+  t('unreadable entry does not abort scan', r1.stderr.includes('dead-run') && r1.stderr.includes('overdue'));
+  t('directory slug beats frontmatter slug', r1.stderr.includes('dirwins') && !r1.stderr.includes('imposter'));
+  t('other session unaffected', stop({ session_id: 's2' }).status === 0);
+  t('stop_hook_active passes through', stop({ session_id: 's1', stop_hook_active: true }).status === 0);
+  t('no state dir is silent', spawnSync(process.execPath, [join(repo, 'hooks', 'smartloop-stop.mjs')], {
+    env: { ...env, SMARTLOOP_DIR: join(work, 'absent') }, input: '{"session_id":"s1"}', encoding: 'utf8',
+  }).status === 0);
+  t('garbage stdin is silent', spawnSync(process.execPath, [join(repo, 'hooks', 'smartloop-stop.mjs')], {
+    env: { ...env, SMARTLOOP_DIR: sl }, input: 'not json', encoding: 'utf8',
+  }).status === 0);
+}
+
+// 12. smartloop-sweep: surfaces non-done runs at session start, silent when none
+{
+  const sl = join(work, 'smartloop'); // fixtures from block 11
+  const sweep = (dir) => spawnSync(process.execPath, [join(repo, 'hooks', 'smartloop-sweep.mjs')], {
+    env: { ...env, SMARTLOOP_DIR: dir }, encoding: 'utf8',
+  });
+  const r = sweep(sl);
+  t('sweep exits 0', r.status === 0);
+  t('sweep lists non-done runs', r.stdout.includes('dead-run') && r.stdout.includes('paused') && r.stdout.includes('overdue'));
+  t('sweep omits done runs', !r.stdout.includes('finished'));
+  t('sweep spares sleeping runs', !r.stdout.includes('sleeping'));
+  t('sweep gives resume hint', r.stdout.includes('/smartloop resume'));
+  t('sweep silent when no runs', sweep(join(work, 'absent')).stdout.trim() === '');
+}
+
+// 13. smartloop: render publishes the skill and registers liveness hooks, idempotently
+{
+  const r = render();
+  t('smartloop render exits 0', r.status === 0);
+  const skill = at('.claude', 'skills', 'smartloop', 'SKILL.md');
+  t('renders smartloop skill', existsSync(skill));
+  t('skill keeps frontmatter first', read(skill).startsWith('---'));
+  t('skill carries end marker', read(skill).includes('rendered by samebrain'));
+  t('skill marker names its source', read(skill).includes('edit skills/smartloop/SKILL.md'));
+  const settings = JSON.parse(read(at('.claude', 'settings.json')));
+  const cmds = Object.values(settings.hooks).flat().flatMap((e) => e.hooks ?? []).map((h) => h.command);
+  t('stop dead-man registered', cmds.some((c) => c.includes('smartloop-stop.mjs')));
+  t('sweep registered', cmds.some((c) => c.includes('smartloop-sweep.mjs')));
+  const r2 = render();
+  t('smartloop render idempotent', r2.stdout.includes('everything in sync'));
+  mkdirSync(join(repo, 'skills', 'bomskill'), { recursive: true });
+  writeFileSync(join(repo, 'skills', 'bomskill', 'SKILL.md'), '﻿---\nname: bomskill\ndescription: x\n---\nbody\n');
+  render();
+  t('BOM stripped from published skill', read(at('.claude', 'skills', 'bomskill', 'SKILL.md')).startsWith('---'));
+}
+
+// 14. setup.mjs = render + friendly summary (hook step degrades outside a git clone)
 {
   const home3 = join(work, 'home3');
   mkdirSync(home3, { recursive: true });
