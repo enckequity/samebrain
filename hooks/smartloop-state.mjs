@@ -1,24 +1,26 @@
 // Shared parser for smartloop state files (~/.smartloop/<slug>/state.md).
 // Frontmatter is line-based key: value — no YAML lib, no deps.
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
 export const stateDir = () => process.env.SMARTLOOP_DIR ?? join(homedir(), '.smartloop');
 
 export function readRuns(dir = stateDir()) {
-  if (!existsSync(dir)) return [];
+  let slugs;
+  try { slugs = readdirSync(dir); } catch { return []; }
   const runs = [];
-  for (const slug of readdirSync(dir)) {
-    const p = join(dir, slug, 'state.md');
-    if (!existsSync(p)) continue;
-    const m = readFileSync(p, 'utf8').match(/^---\r?\n([\s\S]*?)\r?\n---/);
+  for (const slug of slugs) {
+    let text;
+    try { text = readFileSync(join(dir, slug, 'state.md'), 'utf8'); } catch { continue; }
+    const m = text.match(/^---\r?\n([\s\S]*?)\r?\n---/);
     if (!m) continue;
-    const fm = { slug };
+    const fm = {};
     for (const line of m[1].split(/\r?\n/)) {
       const kv = line.match(/^([a-z_]+):\s*(.*)$/);
       if (kv) fm[kv[1]] = kv[2].trim();
     }
+    fm.slug = slug; // directory name is authoritative — frontmatter cannot spoof it
     runs.push(fm);
   }
   return runs;

@@ -155,6 +155,11 @@ const t = (name, cond) => {
   // slug deliberately != 'parked': the hook's stderr guidance names the sentinel value
   mkRun('paused', { slug: 'paused', status: 'waiting:user', owner_session: 's1', next_wake: 'parked' });
   mkRun('finished', { slug: 'finished', status: 'done', owner_session: 's1' });
+  mkRun('overdue', { slug: 'overdue', status: 'waiting:wake', owner_session: 's1', next_wake: '2020-01-01T00:00:00Z' });
+  mkRun('dirwins', { slug: 'imposter', status: 'working', owner_session: 's1' });
+  mkdirSync(join(sl, 'malformed'), { recursive: true });
+  writeFileSync(join(sl, 'malformed', 'state.md'), 'no frontmatter here');
+  mkdirSync(join(sl, 'brokendir', 'state.md'), { recursive: true }); // unreadable: state.md is a directory
   const stop = (payload) => spawnSync(process.execPath, [join(repo, 'hooks', 'smartloop-stop.mjs')], {
     env: { ...env, SMARTLOOP_DIR: sl }, input: JSON.stringify(payload), encoding: 'utf8',
   });
@@ -162,6 +167,10 @@ const t = (name, cond) => {
   t('dead run blocks stop (exit 2)', r1.status === 2);
   t('stderr names the run', r1.stderr.includes('dead-run'));
   t('stderr spares sleeping/parked/done', !r1.stderr.includes('sleeping') && !r1.stderr.includes('paused') && !r1.stderr.includes('finished'));
+  t('expired wake blocks too', r1.status === 2 && r1.stderr.includes('overdue'));
+  t('malformed state.md skipped silently', !r1.stderr.includes('malformed'));
+  t('unreadable entry does not abort scan', r1.stderr.includes('dead-run') && r1.stderr.includes('overdue'));
+  t('directory slug beats frontmatter slug', r1.stderr.includes('dirwins') && !r1.stderr.includes('imposter'));
   t('other session unaffected', stop({ session_id: 's2' }).status === 0);
   t('stop_hook_active passes through', stop({ session_id: 's1', stop_hook_active: true }).status === 0);
   t('no state dir is silent', spawnSync(process.execPath, [join(repo, 'hooks', 'smartloop-stop.mjs')], {
