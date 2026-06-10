@@ -71,6 +71,26 @@ writeIfChanged(
   'claude: ~/.claude/CLAUDE.md',
 );
 
+// ---- 2b. Gemini CLI / Copilot CLI — rendered only where the agent is installed ------
+// No session hooks wired for these yet, so their instructions carry a memory-bootstrap
+// line telling the agent to read the shared index itself each session.
+// (opencode needs no target: it reads ~/.claude/CLAUDE.md globally by default.)
+const MEMORY_BOOTSTRAP = `\n\n## Memory bootstrap\n\nAt the start of each session, read \`${REPO_DISPLAY}/memory/MEMORY.md\` — durable cross-agent facts (details in memory/topics/).`;
+if (existsSync(join(HOME, '.gemini'))) {
+  writeIfChanged(
+    join(HOME, '.gemini', 'GEMINI.md'),
+    `${MARKER}\n\n${guardrails}\n\n${coordination}${addendum('gemini')}${MEMORY_BOOTSTRAP}\n`,
+    'gemini: ~/.gemini/GEMINI.md',
+  );
+}
+if (existsSync(join(HOME, '.copilot'))) {
+  writeIfChanged(
+    join(HOME, '.copilot', 'instructions', 'samebrain.instructions.md'),
+    `---\napplyTo: "**"\n---\n\n${MARKER}\n\n${guardrails}\n\n${coordination}${addendum('copilot')}${MEMORY_BOOTSTRAP}\n`,
+    'copilot: ~/.copilot/instructions/samebrain.instructions.md',
+  );
+}
+
 // ---- 3. MCP ------------------------------------------------------------------------
 const opCache = new Map();
 const opRead = (ref) => {

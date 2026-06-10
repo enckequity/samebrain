@@ -25,8 +25,16 @@ try {
   index = readFileSync(join(root, 'memory', 'MEMORY.md'), 'utf8');
 } catch { process.exit(0); }
 
+// Token-tax guard: the index is injected into every session of every agent —
+// when it outgrows the cap, tell the agent (the one actor who can prune it).
+const CAP = 120;
+const factLines = index.split('\n').filter((l) => l.trim()).length;
+const warn = factLines > CAP
+  ? `\n\nWARNING: memory index has ${factLines} non-blank lines (cap ${CAP}). Prune now: merge stale facts into memory/topics/*.md or delete them.`
+  : '';
+
 const body =
-  `<shared-agent-memory source="${display}/memory" detail-files="memory/topics/*.md">\n${index.trim()}\n</shared-agent-memory>`;
+  `<shared-agent-memory source="${display}/memory" detail-files="memory/topics/*.md">\n${index.trim()}${warn}\n</shared-agent-memory>`;
 
 if (process.argv.includes('--cursor')) {
   process.stdout.write(JSON.stringify({ additional_context: body }));

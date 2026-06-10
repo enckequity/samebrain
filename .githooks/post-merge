@@ -1,0 +1,4 @@
+#!/bin/sh
+# Auto-render after `git pull` so canonical config changes land immediately.
+# Opt-in, once per clone:  git config core.hooksPath .githooks
+node "$(git rev-parse --show-toplevel)/bin/render.mjs"

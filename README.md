@@ -1,5 +1,7 @@
 # samebrain
 
+[![ci](https://github.com/enckequity/samebrain/actions/workflows/ci.yml/badge.svg)](https://github.com/enckequity/samebrain/actions/workflows/ci.yml)
+
 **One brain for every AI coding agent — Claude Code, Codex, Cursor — on every machine.**
 
 If you run more than one AI coding agent, you know the drift: each agent has its own global rules, its own MCP config, its own (lack of) memory. Fix something in Claude Code, and Codex never hears about it. Teach an agent an infra gotcha on your desktop, and the same agent on your laptop relearns it the hard way. Two agents pick up the same task and collide in one checkout.
@@ -45,6 +47,14 @@ On every other machine: clone the same repo, run the same command.
 
 ¹ Codex loads every configured MCP server into memory; keeping `config.toml` lean is deliberate. Add a renderer target if you want it managed.
 
+Also covered, automatically detected (rendered only if the agent's directory exists):
+
+- **Gemini CLI** → `~/.gemini/GEMINI.md`
+- **GitHub Copilot CLI** → `~/.copilot/instructions/samebrain.instructions.md`
+- **opencode** → nothing to render: it reads `~/.claude/CLAUDE.md` globally by default, so it inherits samebrain for free.
+
+Gemini/Copilot don't get memory hooks yet — their rendered instructions carry a memory-bootstrap line telling the agent to read the shared index at session start.
+
 **Rendered files carry a marker comment** — edit the canonical files in `global/`, never the rendered ones. `node bin/render.mjs --check` reports drift without writing. First render backs up anything it replaces to `backups/` (gitignored).
 
 ## Shared memory: git, not a memory server
@@ -89,6 +99,14 @@ git pull upstream main                                                # whenever
 ```
 
 You edit `global/` and `memory/`; the template only evolves `bin/`, `hooks/`, and docs — so pulls merge cleanly.
+
+Optional: auto-render after every pull, so config changes land the moment they arrive:
+
+```bash
+git config core.hooksPath .githooks   # once per clone
+```
+
+Tests live in `test/run.mjs` (no framework, no deps) and run on Linux/macOS/Windows in CI — `node test/run.mjs` locally before a PR.
 
 ## Honest limits
 
