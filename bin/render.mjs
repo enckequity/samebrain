@@ -11,7 +11,7 @@
 // or op://vault/item/field (resolved via the 1Password CLI). Never commit raw secrets.
 import { execFileSync } from 'node:child_process';
 import {
-  copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync,
+  copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync,
 } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -227,6 +227,34 @@ mergeJsonFile(join(HOME, '.cursor', 'hooks.json'), 'cursor: hooks.json memory ho
   };
   ensure('sessionStart', cmd(recall, '--cursor'));
   ensure('stop', cmd(sync));
+});
+
+// ---- 5. Skills + liveness hooks (Claude Code only) -----------------------------------
+{
+  const skillsDir = join(ROOT, 'skills');
+  if (existsSync(skillsDir)) {
+    for (const name of readdirSync(skillsDir)) {
+      const src = join(skillsDir, name, 'SKILL.md');
+      if (!existsSync(src)) continue;
+      writeIfChanged(
+        join(HOME, '.claude', 'skills', name, 'SKILL.md'),
+        `${md(src)}\n\n${MARKER}\n`,
+        `claude: ~/.claude/skills/${name}/SKILL.md`,
+      );
+    }
+  }
+}
+mergeJsonFile(join(HOME, '.claude', 'settings.json'), 'claude: settings.json smartloop hooks', (s) => {
+  s.hooks ??= {};
+  const ensure = (event, command) => {
+    s.hooks[event] ??= [];
+    const all = s.hooks[event].flatMap((e) => e.hooks ?? []);
+    if (!all.some((h) => h.command === command)) {
+      s.hooks[event].push({ matcher: '', hooks: [{ type: 'command', command }] });
+    }
+  };
+  ensure('SessionStart', cmd(join(ROOT, 'hooks', 'smartloop-sweep.mjs')));
+  ensure('Stop', cmd(join(ROOT, 'hooks', 'smartloop-stop.mjs')));
 });
 
 // ---- report -------------------------------------------------------------------------

@@ -196,6 +196,22 @@ const t = (name, cond) => {
   t('sweep silent when no runs', sweep(join(work, 'absent')).stdout.trim() === '');
 }
 
+// 13. smartloop: render publishes the skill and registers liveness hooks, idempotently
+{
+  const r = render();
+  t('smartloop render exits 0', r.status === 0);
+  const skill = at('.claude', 'skills', 'smartloop', 'SKILL.md');
+  t('renders smartloop skill', existsSync(skill));
+  t('skill keeps frontmatter first', read(skill).startsWith('---'));
+  t('skill carries end marker', read(skill).includes('rendered by samebrain'));
+  const settings = JSON.parse(read(at('.claude', 'settings.json')));
+  const cmds = Object.values(settings.hooks).flat().flatMap((e) => e.hooks ?? []).map((h) => h.command);
+  t('stop dead-man registered', cmds.some((c) => c.includes('smartloop-stop.mjs')));
+  t('sweep registered', cmds.some((c) => c.includes('smartloop-sweep.mjs')));
+  const r2 = render();
+  t('smartloop render idempotent', r2.stdout.includes('everything in sync'));
+}
+
 rmSync(work, { recursive: true, force: true });
 console.log(failures ? `\n${failures} failure(s)` : '\nall tests passed');
 process.exit(failures ? 1 : 0);
