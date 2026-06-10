@@ -217,6 +217,18 @@ const t = (name, cond) => {
   t('BOM stripped from published skill', read(at('.claude', 'skills', 'bomskill', 'SKILL.md')).startsWith('---'));
 }
 
+// 14. setup.mjs = render + friendly summary (hook step degrades outside a git clone)
+{
+  const home3 = join(work, 'home3');
+  mkdirSync(home3, { recursive: true });
+  const r = spawnSync(process.execPath, [join(repo, 'bin', 'setup.mjs')], {
+    env: { ...process.env, HOME: home3, USERPROFILE: home3 }, encoding: 'utf8',
+  });
+  t('setup exits 0', r.status === 0);
+  t('setup renders configs', existsSync(join(home3, '.claude', 'CLAUDE.md')));
+  t('setup prints next steps', r.stdout.includes('Make it yours'));
+}
+
 rmSync(work, { recursive: true, force: true });
 console.log(failures ? `\n${failures} failure(s)` : '\nall tests passed');
 process.exit(failures ? 1 : 0);
