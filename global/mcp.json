@@ -1,0 +1,25 @@
+{
+  "_comment": "Canonical MCP servers, rendered per-agent. Keys per server: targets (required: which agents get it — claude|cursor), os (optional platform filter, e.g. ['win32']), win (optional per-OS override merged on Windows), rendered_name (optional output name). Secrets: use ${ENV_VAR} or op://vault/item/field in any string value — NEVER raw secrets, even in a private fork. Move entries from _examples into mcpServers to enable them.",
+  "mcpServers": {},
+  "_examples": {
+    "github": {
+      "targets": ["cursor"],
+      "type": "http",
+      "url": "https://api.githubcopilot.com/mcp/",
+      "headers": { "Authorization": "Bearer ${GITHUB_MCP_PAT}" }
+    },
+    "exa-search": {
+      "targets": ["claude", "cursor"],
+      "type": "http",
+      "url": "https://mcp.exa.ai/mcp",
+      "headers": { "Authorization": "Bearer op://Work/Exa API Key/credential" }
+    },
+    "local-stdio-server": {
+      "targets": ["claude", "cursor"],
+      "os": ["win32"],
+      "command": "node",
+      "args": ["C:\\path\\to\\server.mjs"],
+      "win": { "command": "cmd", "args": ["/c", "npx", "-y", "some-mcp-server"] }
+    }
+  }
+}
