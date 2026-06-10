@@ -26,7 +26,7 @@ limits never lose work. The conversation is scratch; the state file is memory.
 ---
 slug: <task-slug>
 status: working | waiting:<what> | limit-paused | done | blocked:<needs-user>
-owner_session: <current session id>
+owner_session: <CLAUDE_CODE_SESSION_ID of the owning session>
 next_wake: <ISO8601 when sleeping | parked | omit otherwise>
 ---
 ## Contract
@@ -46,7 +46,8 @@ Assumptions: <stated where the task was ambiguous>
 Hard rules: the Contract is never edited after iteration 0 — criteria only get
 checked off, each with an evidence pointer. Journal entries ≤3 lines, pointers
 never payloads. A Stop hook audits `next_wake`: ending a turn with a
-non-terminal run and no live wake (and not `parked`) is blocked.
+non-terminal run and no live wake (and not `parked`) is blocked. The audit
+only protects the session named in `owner_session`.
 
 ## Every entry — start, wake, or resume — runs the same 6 steps
 
@@ -57,7 +58,10 @@ non-terminal run and no live wake (and not `parked`) is blocked.
    the state file before any work.
 1. **Rehydrate.** Read `state.md` — one file. Do not scroll conversation
    history to "remember"; if the answer is not in the state file, the journal
-   was written wrong — fix the journal discipline instead.
+   was written wrong — fix the journal discipline instead. Then take
+   ownership: write this session's id (shell env `CLAUDE_CODE_SESSION_ID`)
+   into `owner_session` — on every entry, not just the first. The Stop audit
+   is owner-scoped; stale ownership means no liveness protection.
 2. **Triage** against the Contract: which criteria are unmet? Is the next
    action executable now, blocked on something external, or is everything
    verified (→ Finish)?
@@ -71,14 +75,16 @@ non-terminal run and no live wake (and not `parked`) is blocked.
 5. **Checkpoint.** Append a journal entry (≤3 lines); update Next action and
    status; roll journal entries older than the current phase into a 5-line
    summary once the journal exceeds ~80 lines; if about to sleep, write
-   `next_wake`.
+   `next_wake`. Wake prompts are always `/smartloop resume <slug>` — never a
+   bare task description (re-entering through the skill reloads the full
+   protocol every wake).
 6. **Pace** with the wait ladder.
 
 ## Wait ladder (a wake replays the whole conversation as input — pay attention)
 
 | Tier | When | Do |
 |---|---|---|
-| 0 | Waiting on harness-tracked work (background commands/agents/workflows) | No wake — the harness re-invokes on completion. At most one 3600s hang-guard. |
+| 0 | Waiting on harness-tracked work (background commands/agents/workflows) | No polling wakes — the harness re-invokes on completion. Schedule the single 3600s hang-guard and record it in `next_wake`; it doubles as the Stop-audit satisfier. |
 | 1 | Fast-changing external state (CI finishing in minutes) | Wakes ≤270s (prompt cache stays warm) |
 | 2 | In-context state still genuinely valuable (hot debugging) | 1200–3600s; justify in the journal. Never 300–1100s. |
 | 3 | Long/indefinite wait (limit pause, overnight, waiting on user) | **Park** (default): checkpoint, notify, `next_wake: parked`, end with no wake. Resume costs one state-file read. |
@@ -96,7 +102,9 @@ serves it, park when in doubt — the state file guarantees nothing is lost.
 - **Code review** — once per changeset at the integration boundary (changeset
   complete, before commit/PR), via a code-review subagent: the diff stays in
   its disposable context; only structured findings return. Findings become new
-  iterations; re-review covers only the fix delta.
+  iterations; re-review covers only the fix delta. Security-sensitive surfaces
+  (auth, payments, user input, secrets) escalate to a security-focused review
+  at the same boundary.
 - **Tier 2 — ship-gates** (merge, deploy, external comms, money): one
   adversarial panel — 3 lenses (correctness, security, does-the-result-satisfy-
   the-contract), schema-forced verdicts, majority rules. For code, review and

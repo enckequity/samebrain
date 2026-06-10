@@ -3,7 +3,8 @@
 //   node bin/render.mjs            apply
 //   node bin/render.mjs --check    report drift, write nothing
 //
-// Owns (full render, backup once):  ~/.codex/AGENTS.md, ~/.claude/CLAUDE.md, ~/.cursor/mcp.json
+// Owns (full render, backup once):  ~/.codex/AGENTS.md, ~/.claude/CLAUDE.md, ~/.cursor/mcp.json,
+//                                   ~/.claude/skills/*
 // Merges (non-destructive):         ~/.claude.json mcpServers, ~/.claude/settings.json hooks,
 //                                   ~/.codex/hooks.json, ~/.cursor/hooks.json
 //
@@ -48,7 +49,7 @@ function writeIfChanged(target, content, label) {
 }
 
 const MARKER = '<!-- rendered by samebrain (bin/render.mjs) — edit global/*.md there, not here -->';
-const md = (p) => read(p).trim().replaceAll('{{REPO}}', REPO_DISPLAY);
+const md = (p) => stripBom(read(p)).trim().replaceAll('{{REPO}}', REPO_DISPLAY);
 const guardrails = md(join(ROOT, 'global', 'guardrails.md'));
 const coordination = md(join(ROOT, 'global', 'coordination.md'));
 const addendum = (name) => {
@@ -238,7 +239,7 @@ mergeJsonFile(join(HOME, '.cursor', 'hooks.json'), 'cursor: hooks.json memory ho
       if (!existsSync(src)) continue;
       writeIfChanged(
         join(HOME, '.claude', 'skills', name, 'SKILL.md'),
-        `${md(src)}\n\n${MARKER}\n`,
+        `${md(src)}\n\n<!-- rendered by samebrain (bin/render.mjs) — edit skills/${name}/SKILL.md in the repo, not here -->\n`,
         `claude: ~/.claude/skills/${name}/SKILL.md`,
       );
     }

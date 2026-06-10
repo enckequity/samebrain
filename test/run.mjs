@@ -204,12 +204,17 @@ const t = (name, cond) => {
   t('renders smartloop skill', existsSync(skill));
   t('skill keeps frontmatter first', read(skill).startsWith('---'));
   t('skill carries end marker', read(skill).includes('rendered by samebrain'));
+  t('skill marker names its source', read(skill).includes('edit skills/smartloop/SKILL.md'));
   const settings = JSON.parse(read(at('.claude', 'settings.json')));
   const cmds = Object.values(settings.hooks).flat().flatMap((e) => e.hooks ?? []).map((h) => h.command);
   t('stop dead-man registered', cmds.some((c) => c.includes('smartloop-stop.mjs')));
   t('sweep registered', cmds.some((c) => c.includes('smartloop-sweep.mjs')));
   const r2 = render();
   t('smartloop render idempotent', r2.stdout.includes('everything in sync'));
+  mkdirSync(join(repo, 'skills', 'bomskill'), { recursive: true });
+  writeFileSync(join(repo, 'skills', 'bomskill', 'SKILL.md'), '﻿---\nname: bomskill\ndescription: x\n---\nbody\n');
+  render();
+  t('BOM stripped from published skill', read(at('.claude', 'skills', 'bomskill', 'SKILL.md')).startsWith('---'));
 }
 
 rmSync(work, { recursive: true, force: true });
