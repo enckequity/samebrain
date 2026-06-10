@@ -14,7 +14,9 @@ const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const work = mkdtempSync(join(tmpdir(), 'samebrain-test-'));
 const repo = join(work, 'repo');
 const home = join(work, 'home');
-const SKIP = new Set(['.git', 'node_modules', 'backups']);
+// Instance data must not leak into the fixture repo: consumers run this suite inside
+// template instances that carry real telemetry and a machine-local rules ack.
+const SKIP = new Set(['.git', 'node_modules', 'backups', 'telemetry', '.cursor-rules-ack', 'dashboard.html']);
 cpSync(ROOT, repo, { recursive: true, filter: (src) => !SKIP.has(basename(src)) });
 mkdirSync(home, { recursive: true });
 
