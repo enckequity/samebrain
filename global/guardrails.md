@@ -29,7 +29,18 @@ Behavioral guidelines to reduce common LLM coding mistakes. Project-level AGENTS
 - "Fix the bug" → write a test that reproduces it, then make it pass.
 - For multi-step tasks, state a brief plan with a verification per step.
 
-## 5. Context / Token Economy
+## 5. Adversarial Review Loop
+
+- Before calling non-trivial work done, attack the result from three lenses:
+  contract fit, correctness, and safety/operations.
+- Record findings as severity / evidence / required fix. Fix every critical or
+  high finding, and any medium finding that affects the contract.
+- Re-run the review on the fix delta until no blocking findings remain. If a
+  risk is intentionally accepted, name the owner/user decision in the final note.
+- For trivial docs/copy-only changes, a quick self-review is enough; do not add
+  ceremony.
+
+## 6. Context / Token Economy
 
 - Cap output: never dump unbounded results. Search/locate first, then open only the specific section needed (± a few lines).
 - Pipe noisy shell output through `head -n N` / `Select-Object -First N`. For unknown-size output, write to a temp file and inspect ranges.

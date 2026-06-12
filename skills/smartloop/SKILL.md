@@ -95,8 +95,8 @@ is a git clone of it — park on one machine, resume on another:
 0. **Compile** (first entry only). Transform the raw task into the Contract:
    one-line goal; success criteria as executable checks, each tier-classified;
    out-of-scope list; stated assumptions. A code-producing task auto-adds the
-   criterion "diff reviewed; CRITICAL/HIGH findings resolved" [tier 2]. Write
-   the state file before any work.
+   criterion "adversarial review loop complete; blocking findings resolved"
+   [tier 2]. Write the state file before any work.
 1. **Rehydrate.** Read `state.md` — one file. Do not scroll conversation
    history to "remember"; if the answer is not in the state file, the journal
    was written wrong — fix the journal discipline instead. Then take
@@ -143,19 +143,19 @@ corpus by `bin/optimize.mjs --pacing`) — consult them before choosing a tier.
 - **Tier 1 — code changes**: executed evidence required (test/build/probe run;
   excerpt saved to `evidence/`). Write the failing test first where the
   project's rules call for TDD.
-- **Code review** — once per changeset at the integration boundary (changeset
-  complete, before commit/PR), via a code-review subagent: the diff stays in
-  its disposable context; only structured findings return. Findings become new
-  iterations; re-review covers only the fix delta. Security-sensitive surfaces
-  (auth, payments, user input, secrets) escalate to a security-focused review
-  at the same boundary.
-- **Tier 2 — ship-gates** (merge, deploy, external comms, money): one
-  adversarial panel — 3 lenses (correctness, security, does-the-result-satisfy-
-  the-contract), schema-forced verdicts, majority rules. For code, review and
-  refutation merge into this single panel.
+- **Adversarial review loop** — once per changeset at the integration boundary
+  (changeset complete, before commit/PR/merge/deploy). Run three lenses:
+  contract fit, correctness, and safety/security/operations. Round 1 reviews
+  the whole diff/result; if any blocking finding appears, fix it and run the
+  next round only on the fix delta. The loop ends only when no critical/high
+  finding remains and no medium finding still breaks the Contract.
+- **Tier 2 — ship-gates** (merge, deploy, external comms, money): the full
+  adversarial panel is mandatory, with schema-forced verdicts. For code, review
+  and refutation merge into this single panel rather than separate ceremonies.
 - **Panel verdicts are labeled data.** Record each tier-2 verdict as a
   structured object — `{"lens": "correctness|security|contract", "verdict":
-  "pass|fail", "reason": "<one line>"}` — in the run's evidence, and carry the
+  "pass|fail", "reason": "<one line>"}` — in
+  `evidence/adversarial-review.jsonl`, grouped by round, and carry the final
   array into the run-summary `verdicts` field at finish. Never free-prose a
   verdict; the corpus feeds later analysis.
 - **Learned tier floors:** `{{REPO}}/global/addenda/smartloop-tiers.md`, when

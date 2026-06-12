@@ -123,7 +123,10 @@ parked runs (printing nothing when there are none). Agent-neutral since v5: the
 skill and both liveness hooks render to Claude Code, Codex, and Cursor, with an
 adapter table mapping each harness's session id and wake primitives (agents
 without scheduled wakes run park-only). `/smartloop portfolio` drains every
-non-done run under one quota, cheapest rehydrate first. Design rationale in
+non-done run under one quota, cheapest rehydrate first. Before ship-bound work
+finishes, smartloop runs an adversarial review loop over contract fit,
+correctness, and safety/security/operations, then fixes and re-reviews blocking
+findings. Design rationale in
 `docs/plans/2026-06-10-smartloop-design.md`. The skill ships in
 `skills/smartloop/` and renders like every other target.
 
