@@ -81,8 +81,8 @@ Assumptions: <stated where the prompt was ambiguous>
 0. **Compile** (first entry only). Raw task → Contract: one-line goal,
    executable success criteria with a verification tier each, out-of-scope
    list, stated assumptions. Code-producing tasks auto-add the criterion
-   *"diff reviewed; CRITICAL/HIGH findings resolved."* Write state file
-   before any work.
+   *"adversarial review loop complete; blocking findings resolved."* Write
+   state file before any work.
 1. **Rehydrate.** Read `state.md` — one file. Scrolling conversation history
    to "remember" is a protocol violation; if the answer isn't in the state
    file, the journal was written wrong.
@@ -146,17 +146,17 @@ lost.
 - **Tier 1 — code changes**: executed evidence required (test/build/probe
   run, excerpt saved to `evidence/`). TDD per consumer rules — the failing
   test is evidence the criterion is real.
-- **Code review — once per changeset, not per iteration.** Fires at the
-  integration boundary (changeset complete, before commit/PR) via a Code
-  Reviewer subagent: diff dump stays in its disposable context; structured
-  findings return (severity / file:line / issue). Findings → new iterations;
-  re-review covers only the fix delta. Security-sensitive surfaces add the
-  security-review trigger. Public core ships a generic review prompt;
-  consumer overlays may point at richer agents.
-- **Tier 2 — ship-gates** (merge, deploy, external comms, money): adversarial
-  panel — one Workflow call, 3 lenses (correctness, security,
-  does-the-diff-satisfy-the-contract), schema-forced verdicts, majority
-  rules. For code tasks, review and refutation merge into this single panel.
+- **Adversarial review loop — once per changeset, not per iteration.** Fires
+  at the integration boundary (changeset complete, before commit/PR/merge/
+  deploy). Round 1 reviews the whole diff/result through three lenses:
+  contract fit, correctness, and safety/security/operations. Findings become
+  new iterations; after fixes, re-review only the fix delta. The loop ends only
+  when no critical/high finding remains and no medium finding still breaks the
+  Contract.
+- **Tier 2 — ship-gates** (merge, deploy, external comms, money): the full
+  adversarial panel is mandatory, with schema-forced verdicts saved to
+  `evidence/adversarial-review.jsonl` and carried into run-summary `verdicts`.
+  For code tasks, review and refutation merge into this single panel.
 - Classification rule: when in doubt, tier up.
 
 ## Limit handling

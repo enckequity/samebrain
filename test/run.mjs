@@ -507,6 +507,8 @@ const t = (name, cond) => {
   t('rule-mine resolves repo path', !skill.includes('{{REPO}}'));
   const claudeMd = read(at('.claude', 'CLAUDE.md'));
   t('coordination carries the lease protocol', claudeMd.includes('lease-check.mjs claim'));
+  t('rendered instructions carry adversarial review loop', claudeMd.includes('Adversarial Review Loop')
+    && read(at('.codex', 'AGENTS.md')).includes('Adversarial Review Loop'));
 }
 
 // 30. Wider agent matrix: opencode / Factory Droid / Pi, detection-gated like Gemini/Copilot
@@ -553,6 +555,8 @@ const t = (name, cond) => {
     && wrapped.additional_context.includes('cursor-run'));
   const skill = read(join(repo, 'skills', 'smartloop', 'SKILL.md'));
   t('skill carries the adapter table', skill.includes('## Agent adapters') && skill.includes('park-only'));
+  t('skill carries adversarial review evidence contract',
+    skill.includes('evidence/adversarial-review.jsonl') && skill.includes('fix delta'));
 }
 
 // 32. Portfolio mode: ordered drain queue — cheap first, limit-paused deferred
