@@ -46,7 +46,9 @@ Behavioral guidelines to reduce common LLM coding mistakes. Project-level AGENTS
 - Pipe noisy shell output through `head -n N` / `Select-Object -First N`. For unknown-size output, write to a temp file and inspect ranges.
 - Skip `node_modules`, `.venv`, `dist`, `build`, `.next`, caches, lockfiles, generated/minified files unless the task is about them.
 - Terse by default: lead with the answer/patch + a one-line why. No preamble or recap padding.
-- Fan out to subagents/parallel sessions for breadth when the platform supports it.
+- **Batch independent tool calls into one message.** Every message re-reads the whole context, so a serial tool call pays the full context cost to return a few hundred tokens. Only serialize when the second call genuinely needs the first one's output.
+- **Browser work runs in a subagent, never the main thread.** Screenshots are large and never leave context, so every later call in the session re-pays for them. Prefer batched browser actions over repeated single ones.
+- Fan out to subagents for breadth (a search subagent returns conclusions, not file dumps — the fan-out never enters the main context).
 
 ## Conventions
 
