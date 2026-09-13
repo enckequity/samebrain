@@ -2,7 +2,7 @@
 // Render canonical agent config to per-agent global files on THIS machine. Idempotent.
 //   node bin/render.mjs                     apply
 //   node bin/render.mjs --check             report drift, write nothing
-//   node bin/render.mjs --gc                roll telemetry months older than 3 into archive lines
+//   node bin/render.mjs --gc                roll old telemetry months into archive lines + prune dead leases
 //   node bin/render.mjs --ack-cursor-rules  record that Cursor User Rules match global/cursor-user-rules.md
 //
 // Owns (full render, backup once):  ~/.codex/AGENTS.md, ~/.claude/CLAUDE.md, ~/.cursor/mcp.json,
@@ -385,6 +385,36 @@ mergeJsonFile(join(HOME, '.cursor', 'hooks.json'), 'cursor: hooks.json smartloop
           changes.push(`telemetry: rolled ${machine}/${file} into archive.jsonl`);
         }
       }
+    }
+  }
+}
+
+// ---- 6b. Lease hygiene ----------------------------------------------------------------
+// coordination/leases/<scope>.lease files are git-committed claims. Nothing deletes an
+// expired lease, so dead claims pile up and flood `bin/status.mjs`. Warn when any are
+// past the grace window; --gc prunes them (and malformed files, which are never claimable)
+// so housekeeping is one command. Grace defaults to 7 days, override with
+// SAMEBRAIN_LEASE_GRACE_DAYS.
+{
+  const leaseDir = join(ROOT, 'coordination', 'leases');
+  if (existsSync(leaseDir)) {
+    const envGrace = Number(process.env.SAMEBRAIN_LEASE_GRACE_DAYS);
+    const graceDays = Number.isFinite(envGrace) && envGrace >= 0 ? envGrace : 7;
+    const cutoff = Date.now() - graceDays * 86400000;
+    let files = [];
+    try { files = readdirSync(leaseDir).filter((f) => f.endsWith('.lease')); } catch { /* unreadable */ }
+    let prunable = 0;
+    for (const file of files) {
+      const path = join(leaseDir, file);
+      let dead = false;
+      try { dead = Date.parse(JSON.parse(read(path)).expires) < cutoff; }
+      catch { dead = true; /* malformed = never claimable */ }
+      if (!dead) continue;
+      prunable += 1;
+      if (GC && !CHECK) { rmSync(path); changes.push(`lease: pruned ${file}`); }
+    }
+    if (prunable > 0 && !GC) {
+      console.log(`render: ${prunable} expired lease(s) past the ${graceDays}-day grace — run: node bin/render.mjs --gc`);
     }
   }
 }

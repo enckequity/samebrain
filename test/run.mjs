@@ -263,6 +263,26 @@ const t = (name, cond) => {
   t('one line per session', read(telFile).trim().split('\n').length === 2);
 }
 
+// 16c. sync.mjs commits coordination/leases so a claim taken here crosses machines
+{
+  const box = join(work, 'sync-git');
+  mkdirSync(join(box, 'hooks'), { recursive: true });
+  cpSync(join(repo, 'hooks', 'sync.mjs'), join(box, 'hooks', 'sync.mjs'));
+  mkdirSync(join(box, 'coordination', 'leases'), { recursive: true });
+  const g = (...args) => execFileSync('git', args, { cwd: box, stdio: ['ignore', 'pipe', 'pipe'] }).toString().trim();
+  g('init'); g('config', 'user.email', 't@t'); g('config', 'user.name', 't');
+  g('add', '-A'); g('commit', '-m', 'init', '--quiet');
+  writeFileSync(join(box, 'coordination', 'leases', 'claim.lease'),
+    JSON.stringify({ owner: 'claude@boxa', expires: '2099-01-01T00:00:00Z' }));
+  const r = spawnSync(process.execPath, [join(box, 'hooks', 'sync.mjs'), '--agent', 'claude'], {
+    env, input: '{}', encoding: 'utf8',
+  });
+  t('sync exits 0 in a git repo with no remote', r.status === 0);
+  t('sync commits the new lease', g('ls-files', 'coordination/leases').includes('claim.lease'));
+  t('sync records a session commit', g('log', '--oneline').includes('session update'));
+  t('sync leaves no uncommitted lease', g('status', '--porcelain', 'coordination') === '');
+}
+
 // 16b. smartloop run-summary format (specified in SKILL.md) round-trips through a parser
 {
   const sample = { ts: '2026-06-10T12:00:00Z', slug: 'fix-ci', outcome: 'done', iters: 4, wall_s: 1800, verdicts: [] };
@@ -296,6 +316,25 @@ const t = (name, cond) => {
   t('--gc archives a per-month summary', archive.month === '2020-01' && archive.sessions === 2 && archive.by_agent.claude === 1);
   t('--gc spares the current month', existsSync(join(dir, `${month}.jsonl`)));
   rmSync(join(dir, `${month}.jsonl`)); // don't trip later size warnings
+}
+
+// 17b. Lease hygiene: warn on dead leases, --gc prunes expired + malformed ones
+{
+  const ld = join(repo, 'coordination', 'leases');
+  mkdirSync(ld, { recursive: true });
+  writeFileSync(join(ld, 'old.lease'), JSON.stringify({ owner: 'a@b', expires: '2020-01-01T00:00:00Z' }));
+  writeFileSync(join(ld, 'live.lease'), JSON.stringify({ owner: 'c@d', expires: '2099-01-01T00:00:00Z' }));
+  writeFileSync(join(ld, 'broken.lease'), 'not json');
+  const r1 = render({ SB_FILE_TOKEN: 'x' });
+  t('plain render warns on prunable leases', r1.stdout.includes('expired lease'));
+  t('plain render spares dead leases', existsSync(join(ld, 'old.lease')));
+  const r2 = spawnSync(process.execPath, [join(repo, 'bin', 'render.mjs'), '--gc'], {
+    env: { ...env, SB_FILE_TOKEN: 'x' }, encoding: 'utf8',
+  });
+  t('--gc prunes the expired lease', r2.status === 0 && !existsSync(join(ld, 'old.lease')));
+  t('--gc prunes the malformed lease', !existsSync(join(ld, 'broken.lease')));
+  t('--gc spares the live lease', existsSync(join(ld, 'live.lease')));
+  rmSync(ld, { recursive: true });
 }
 
 // 18. Codex MCP opt-in: targets ["codex"] merges into ~/.codex/config.toml, section-level
