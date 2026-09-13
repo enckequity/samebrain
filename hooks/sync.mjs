@@ -1,10 +1,10 @@
 #!/usr/bin/env node
-// Session-end sync: append one telemetry record, then commit + push memory/telemetry
+// Session-end sync: append one telemetry record, then commit + push memory/telemetry/lease
 // changes. Fail-silent, never blocks.
 //   sync.mjs --agent <claude|codex|cursor>   (agent name baked in by render.mjs)
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { appendFileSync, mkdirSync, readFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { hostname } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -41,11 +41,23 @@ const git = (args, timeout = 10000) =>
   execFileSync('git', args, { cwd: root, timeout, stdio: ['ignore', 'pipe', 'ignore'] })
     .toString().trim();
 
+// Commit leases alongside memory/telemetry so a claim taken on this machine is visible
+// to every other machine (the lease protocol says commit the file — this does it for you).
+// Only stage paths that exist: `git add` errors on a missing pathspec and would abort the
+// whole sync on an instance that, say, keeps no local telemetry yet.
+const paths = ['memory', 'telemetry', 'coordination/leases'].filter((p) => existsSync(join(root, p)));
+
 try {
-  if (git(['status', '--porcelain', '--', 'memory', 'telemetry'])) {
-    git(['add', 'memory', 'telemetry']);
+  if (paths.length && git(['status', '--porcelain', '--', ...paths])) {
+    git(['add', '--', ...paths]);
     git(['commit', '-m', 'mem: session update', '--quiet']);
   }
-  // Push any unpushed commits (this session's or a previously offline one)
-  git(['push', '--quiet'], 15000);
+  try {
+    // Push any unpushed commits (this session's or a previously offline one)
+    git(['push', '--quiet'], 15000);
+  } catch {
+    // Rejected — another machine pushed first. Reconcile once over a rebase, then retry.
+    try { git(['pull', '--rebase', '--autostash', '--quiet'], 15000); git(['push', '--quiet'], 15000); }
+    catch { /* still offline — next session's recall pull will rebase */ }
+  }
 } catch { /* offline — next session's recall pull will rebase */ }

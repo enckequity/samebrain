@@ -18,7 +18,15 @@ try {
   execFileSync('git', ['pull', '--rebase', '--autostash', '--quiet'], {
     cwd: root, timeout: 8000, stdio: ['ignore', 'ignore', 'ignore'],
   });
-} catch { /* offline or slow remote — serve the local copy */ }
+} catch {
+  // Offline or a conflicted rebase. A rebase left in progress would wedge every later
+  // git op on this repo — abort it and serve the local copy. Fail-silent.
+  try {
+    execFileSync('git', ['rebase', '--abort'], {
+      cwd: root, timeout: 5000, stdio: ['ignore', 'ignore', 'ignore'],
+    });
+  } catch { /* no rebase in progress */ }
+}
 
 // Rebase pulls never fire the post-merge auto-render hook: re-render whenever HEAD
 // has moved past the last rendered revision, so engine updates land on every machine

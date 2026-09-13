@@ -152,6 +152,8 @@ This is the raw material for dashboards, eval datasets, and (later) tuning — a
 which is one more reason instances should be private. Hygiene: render warns when the current
 month exceeds 1MB; `node bin/render.mjs --gc` rolls months older than 3 into one-line summaries
 in `archive.jsonl`. smartloop runs add a summary record per finished run (`smartloop-runs.jsonl`).
+The same `--gc` prunes coordination leases that expired more than 7 days ago (override with
+`SAMEBRAIN_LEASE_GRACE_DAYS`), plus malformed lease files; plain render only warns.
 
 </details>
 
@@ -194,7 +196,7 @@ Rendered agent configs get literal values (agents can't expand references); the 
 
 `global/coordination.md` renders into every agent's instructions, so all of them follow one protocol: claim a GitHub issue (label `agent:claude` / `agent:codex` / `agent:cursor`) before non-trivial work, always work in a dedicated `git worktree`, branch under your namespace (`claude/*`, `codex/*`, `cursor/*`), integrate via PR only. The PR queue serializes conflicts; `git reflog` recovers from branch flips.
 
-Claims are also enforced mechanically: `node hooks/lease-check.mjs claim <scope> --owner <agent>@<machine>` writes a lease file in git (`coordination/leases/`) and exits 2 if someone else holds a live lease. Stale leases expire by timestamp — no daemon. `bin/status.mjs` shows open leases fleet-wide.
+Claims are also enforced mechanically: `node hooks/lease-check.mjs claim <scope> --owner <agent>@<machine>` writes a lease file in git (`coordination/leases/`) and exits 2 if someone else holds a live lease. Stale leases expire by timestamp — no daemon; the session-end hook commits leases along with memory so a claim crosses machines, and `node bin/render.mjs --gc` prunes the dead ones. `bin/status.mjs` shows open leases fleet-wide.
 
 </details>
 
