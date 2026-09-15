@@ -1,0 +1,129 @@
+{
+  "_comment": "Optional Hindsight long-term memory backend (https://github.com/vectorize-io/hindsight). OFF by default: nothing here runs until enabled is true AND apiUrlEnv + apiKeyEnv resolve from the environment or the gitignored secrets.env. Secrets never go in this file. When enabled, every agent runs the pinned @vectorize-io/hindsight-coding-agents runtime (staged by bin/hindsight-activate.mjs) for capture, session start adds a bounded recall next to the markdown index, and the markdown index stays the floor whenever the server is unreachable. manageBankConfig stays off so the server owns bank configuration. The runtime's per-step opencode capture stays off (it retains every model step); autonomous opencode sessions are captured once per finished task by plugins/samebrain-memory.ts via hooks/opencode-capture.mjs. The codebase survey stays off: it bills headless agent runs.",
+  "enabled": false,
+  "apiUrlEnv": "HINDSIGHT_API_URL",
+  "apiKeyEnv": "HINDSIGHT_API_KEY",
+  "globalBank": "global",
+  "nonRepoDirs": [
+    "~",
+    "~/Desktop",
+    "~/Documents",
+    "~/Downloads"
+  ],
+  "sessionRecall": {
+    "query": "Durable decisions, conventions, gotchas and open work for the {bank} project",
+    "globalQuery": "Durable cross-project facts, preferences, account mappings and infrastructure gotchas",
+    "budget": "mid",
+    "maxTokens": 700,
+    "globalMaxTokens": 400,
+    "types": [
+      "world",
+      "experience",
+      "observation"
+    ],
+    "preferObservations": true,
+    "refreshTimeoutMs": 60000,
+    "coldTimeoutMs": 1500,
+    "revalidateAfterMs": 300000
+  },
+  "search": {
+    "budget": "mid",
+    "maxTokens": 1500,
+    "types": [
+      "world",
+      "experience",
+      "observation"
+    ],
+    "preferObservations": true,
+    "timeoutMs": 15000
+  },
+  "codingAgents": {
+    "package": "@vectorize-io/hindsight-coding-agents",
+    "version": "0.6.1",
+    "integrity": "sha512-7CdHjyRsvkWqK6k2aa4QifGh3iJfdYL7o2jW+JzgKltI/QKka0XI1YJt3zX6e0b+HXO5ll2/c3+3DVhD8N6BSA==",
+    "runtimeDir": "~/.hindsight/coding-agents",
+    "configFile": "~/.hindsight/coding-agent.json",
+    "config": {
+      "serverMode": "self-hosted",
+      "bankIdTemplate": "{gitProject}",
+      "resolveWorktrees": true,
+      "retainSessions": true,
+      "observationScopes": "shared",
+      "autoReflect": true,
+      "reflectBudget": "mid",
+      "autoSeed": true,
+      "gitIngest": "message",
+      "seedLimit": 100,
+      "codebaseSurvey": false,
+      "surveyRefreshCommits": 0,
+      "pageTriggerType": "cron",
+      "pageTriggerCron": "H H * * *",
+      "manageBankConfig": false,
+      "autoUpdate": false,
+      "logLevel": "warn",
+      "harnesses": {
+        "opencode": {
+          "retainSessions": false
+        }
+      }
+    }
+  },
+  "bankSetup": {
+    "_comment": "Applied by bin/hindsight-banks.mjs as knowledge pages (searchable knowledge-base nodes) and directives. List the global bank plus one bank per repository (its directory name). Pages refresh daily on a per-bank staggered cron from observations; delta pages are cleared and rebuilt every clearEveryHours to shed drift. Directives are bank-global.",
+    "banks": [
+      "global"
+    ],
+    "pageMaxTokens": 2048,
+    "clearEveryHours": 48,
+    "pages": [
+      {
+        "name": "Working directives",
+        "mode": "delta",
+        "source_query": "What standing directives, rules and preferences has the user given for how agents must work: verification, communication, git and PR conventions, spending and escalation limits?"
+      },
+      {
+        "name": "Production facts & deploy paths",
+        "mode": "delta",
+        "source_query": "What are the current production facts: where each service and database runs, how code reaches production (what deploys automatically on merge and what is deployed manually, by which command), and which migrations or configs must be applied by hand?"
+      },
+      {
+        "name": "Active gotchas",
+        "mode": "delta",
+        "source_query": "Which gotchas, traps and known failure modes are still active and must be checked before acting, with the concrete symptom and the fix for each?"
+      },
+      {
+        "name": "Current work in flight",
+        "mode": "full",
+        "source_query": "What work is currently in flight: open issues, programs and PRs, their latest state, blockers and next steps?"
+      }
+    ],
+    "directives": [
+      {
+        "name": "Never expose secrets",
+        "priority": 20,
+        "content": "Never print, echo, paste or store secret values (API keys, tokens, passwords, private keys). Reference them by environment variable or secret-manager item instead."
+      },
+      {
+        "name": "Verify before claiming done",
+        "priority": 10,
+        "content": "Only claim work is done after verifying it against its success criteria with evidence (tests, command output, live checks), and separate local evidence from live or production proof."
+      }
+    ]
+  },
+  "sessionPages": {
+    "maxCharsPerPage": 1800
+  },
+  "retiredClaudePlugin": {
+    "marketplace": "hindsight",
+    "plugin": "hindsight-memory",
+    "configFile": "~/.hindsight/claude-code.json"
+  },
+  "backfill": {
+    "_comment": "Session ids never backfilled (for example planning transcripts whose outcomes already live in the curated memory files).",
+    "excludeSessionIds": []
+  },
+  "codex": {
+    "_comment": "Hindsight captures Codex sessions, so Codex native memories are switched off to keep one writer.",
+    "nativeMemories": false
+  }
+}
