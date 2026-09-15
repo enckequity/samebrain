@@ -1,6 +1,6 @@
 ---
 name: rule-mine
-description: Mine recent sessions for repeated user corrections and propose guardrail edits as a PR. Use on /rule-mine.
+description: Turn repeated, evidenced user corrections into a minimal guardrail pull request when /rule-mine is invoked.
 ---
 
 # rule-mine

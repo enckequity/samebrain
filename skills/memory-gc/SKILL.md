@@ -1,13 +1,15 @@
 ---
 name: memory-gc
-description: Garbage-collect the shared agent memory index. Use on /memory-gc or when the recall hook warns that memory/MEMORY.md is over its line cap.
+description: Compact the shared memory index when /memory-gc is invoked or the recall hook reports that memory/MEMORY.md exceeds its size cap.
 ---
 
 # memory-gc
 
 Keep `{{REPO}}/memory/MEMORY.md` cheap: it is injected into every session of
 every agent, so every line is a recurring token tax. Target: under 120 non-blank
-lines, one line per fact.
+lines and 12KB, one line per fact. Detail belongs in `memory/topics/` (which
+Hindsight ingests and `bin/memory-search.mjs` searches, when that optional
+backend is enabled).
 
 ## Procedure
 

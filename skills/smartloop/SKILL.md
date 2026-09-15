@@ -1,6 +1,6 @@
 ---
 name: smartloop
-description: Run any task as a token-optimized, verification-tiered, self-pacing loop with durable state. Use on /smartloop <task>, /smartloop resume [slug], /smartloop status, /smartloop portfolio, /smartloop backlog <source>.
+description: Run an explicitly invoked /smartloop task with durable state, checkpoints, verification tiers, and wait or resume handling.
 ---
 
 # smartloop
@@ -28,16 +28,21 @@ limits never lose work. The conversation is scratch; the state file is memory.
 The protocol and state files are agent-neutral; only the harness primitives
 differ. Look up your row and substitute accordingly:
 
-| Adapter | Claude Code | Codex | Cursor |
-|---|---|---|---|
-| Session id (for `owner_session`) | `CLAUDE_CODE_SESSION_ID` env | session/thread id from the harness | conversation id from the harness |
-| Scheduled wakes | native (ScheduleWakeup) | none → park-only | background agents only → park-only |
-| Liveness hooks | SessionStart sweep + Stop audit | same (hooks.json) | same (hooks.json) |
+| Adapter | Claude Code | Codex | Cursor | OpenCode |
+|---|---|---|---|---|
+| Session id (for `owner_session`) | `CLAUDE_CODE_SESSION_ID` env | session/thread id from the harness | conversation id from the harness | `SMARTLOOP_SESSION_ID` env (driver-set) → else `<agent>-<machine>-<date>` |
+| Scheduled wakes | native (ScheduleWakeup) | none → park-only | background agents only → park-only | none → park-only, swept by the launchd driver |
+| Liveness hooks | SessionStart sweep + Stop audit | same (hooks.json) | same (hooks.json) | driver `--portfolio` sweep; Stop audit not wired |
 
 **Park-only fallback:** without scheduled wakes, ladder tiers 1–2 are
 unavailable — use tier 0 (harness-tracked work) or park (tier 3). A parked run
 is resumable from any agent: state files carry no agent-specific content.
-If you cannot determine a session id, use `<agent>-<machine>-<date>`; the Stop
+OpenCode has no native wake, so an OpenCode run always parks: `{{REPO}}/bin/smartloop-driver.sh`
+(opt-in launchd job via `--install`, every 30 min) resumes each non-done run listed
+in `~/.smartloop/driver-allowlist` with `opencode run --auto --agent autonomous
+"/smartloop resume <slug>"`. Add a slug to that allowlist to let the driver carry it;
+absent the file, the driver drives every non-done run. If you cannot determine a
+session id, use `<agent>-<machine>-<date>`; the Stop
 audit only protects exact `owner_session` matches, so a stable id matters.
 
 ## State file format

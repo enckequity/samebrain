@@ -18,6 +18,10 @@ let payload = {};
 if (!process.stdin.isTTY) {
   try { payload = JSON.parse(readFileSync(0, 'utf8')); } catch { /* no/odd payload */ }
 }
+// Harnesses that cannot pipe a payload (e.g. the opencode plugin spawns us with
+// stdin ignored) can pass the same fields as env vars instead.
+if (process.env.SAMEBRAIN_SESSION_ID) payload.session_id ??= process.env.SAMEBRAIN_SESSION_ID;
+if (process.env.SAMEBRAIN_CWD) payload.cwd ??= process.env.SAMEBRAIN_CWD;
 
 // One JSONL record per session: only fields the agent gave us for free.
 try {
