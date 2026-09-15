@@ -11,6 +11,7 @@
 //   --bank <id>              only documents routed to this bank
 //   --limit <n>              at most n documents after filtering (smoke runs)
 //   --verbose                list every document
+//   --canary-every-hours 24  re-prove server-side redaction at most this often (0 = every run)
 //
 // Routing: shared/auto/Codex memory → the global bank; a session transcript → the bank its
 // recorded working directory resolves to: its repository name exactly as the live plugins name it
@@ -62,6 +63,7 @@ const ONLY_BANK = opt('--bank');
 const LIMIT = opt('--limit') ? Number(opt('--limit')) : Infinity;
 const SAMEBRAIN_DIR = opt('--samebrain-dir', ROOT);
 const LEDGER = join(HOME, '.hindsight', 'samebrain-backfill.json');
+const CANARY_EVERY_HOURS = Number(opt('--canary-every-hours', '24'));
 
 for (const s of SOURCES) if (!ALL_SOURCES.includes(s)) fail(`unknown source "${s}" (valid: ${ALL_SOURCES.join(', ')})`);
 if (!Number.isFinite(MAX_USD) || MAX_USD <= 0) fail('--max-usd must be a positive number');
@@ -215,10 +217,30 @@ function samebrainMemory() {
     'samebrain shared cross-agent memory', `# ${relative(dir, f)}\n\n${readFileSync(f, 'utf8')}`));
 }
 
+// Claude Code auto-memory for every project. The home project keeps its original document ids;
+// another project's files go to the bank its recorded working directory resolves to.
 function claudeAutoMemory() {
-  const dir = join(HOME, '.claude', 'projects', `-${HOME.slice(1).replaceAll('/', '-')}`, 'memory');
-  return walk(dir, (p) => p.endsWith('.md')).map((f) => markdownDoc('claude-memory', `claude-memory:${relative(dir, f)}`, f,
-    'Claude Code auto-memory', readFileSync(f, 'utf8')));
+  const projects = join(HOME, '.claude', 'projects');
+  const homeProject = `-${HOME.slice(1).replaceAll('/', '-')}`;
+  const docs = [];
+  let names = [];
+  try { names = readdirSync(projects); } catch { return docs; }
+  for (const name of names) {
+    const dir = join(projects, name, 'memory');
+    const files = walk(dir, (p) => p.endsWith('.md'));
+    if (!files.length) continue;
+    let bank = settings.globalBank;
+    if (name !== homeProject) {
+      const transcript = readdirSync(join(projects, name)).find((f) => f.endsWith('.jsonl'));
+      const cwd = transcript && readFileSync(join(projects, name, transcript), 'utf8').match(/"cwd":"([^"]+)"/)?.[1];
+      bank = (cwd && existsSync(cwd) && repoName(cwd)) || settings.globalBank;
+    }
+    for (const f of files) {
+      const id = name === homeProject ? `claude-memory:${relative(dir, f)}` : `claude-memory:${name}/${relative(dir, f)}`;
+      docs.push({ ...markdownDoc('claude-memory', id, f, 'Claude Code auto-memory', readFileSync(f, 'utf8')), bank });
+    }
+  }
+  return docs;
 }
 
 // ~/.codex/memories is read-only here. MEMORY.md holds "# Task Group:" sections and
@@ -490,9 +512,15 @@ async function main() {
     mkdirSync(dirname(LEDGER), { recursive: true });
     writeFileSync(LEDGER, `${JSON.stringify(ledger, null, 2)}\n`, { mode: 0o600 });
   };
-  if (order.length) {
+  // The server enforces redaction as tenant config; the canary proves it at most once a day, so an
+  // incremental sync from the session hook does not create a throwaway bank every run.
+  const canaryStamp = join(HOME, '.hindsight', 'samebrain-canary-ok.json');
+  const canaryFresh = (() => { try { return Date.now() - statSync(canaryStamp).mtimeMs < CANARY_EVERY_HOURS * 3600000; } catch { return false; } })();
+  if (order.length && !canaryFresh) {
     const leak = await redactionCanary(hs);
     if (leak) fail(`aborting before sending anything: ${leak}`);
+    mkdirSync(dirname(canaryStamp), { recursive: true });
+    writeFileSync(canaryStamp, `${JSON.stringify({ at: new Date().toISOString() })}\n`, { mode: 0o600 });
     console.log('  redaction canary: server stored no trace of the fake key');
   }
   let spent = 0;

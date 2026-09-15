@@ -16,7 +16,9 @@
 //              Hindsight first (bin/memory-search.mjs: repo bank + global bank, bounded
 //              timeout) and falls back to BM25 over memory/topics/*.md when Hindsight is
 //              unconfigured, unreachable or has nothing.
-//   record   - memory_append for a new durable fact; memory_sync to flush now.
+//   record   - memory_append for a new durable fact in the markdown index; memory_retain writes one
+//              to Hindsight when that optional backend is enabled (bin/memory-retain.mjs);
+//              memory_sync flushes git now.
 //
 // Env knobs:
 //   SAMEBRAIN_DIR                 repo root (default: this repo, set at render)
@@ -42,6 +44,10 @@ const TOPICS = join(MEMORY, "topics")
 const RECALL = join(ROOT, "hooks", "recall.mjs")
 const SYNC = join(ROOT, "hooks", "sync.mjs")
 const SEARCH = join(ROOT, "bin", "memory-search.mjs")
+const RETAIN = join(ROOT, "bin", "memory-retain.mjs")
+// Node binary for the samebrain scripts. Never process.execPath: inside opencode that is the opencode
+// binary, which cannot run them, so every spawn failed and search/recall/sync fell back silently.
+const NODE = process.env.SAMEBRAIN_NODE ?? "{{NODE}}"
 const CAPTURE = join(ROOT, "hooks", "opencode-capture.mjs")
 const AUTO_CONTINUE = join(ROOT, "hooks", "auto-continue-core.mjs")
 
@@ -97,9 +103,9 @@ function buildBlock(): string | null {
 
   const lines = raw.split("\n").filter((l) => !l.trim().startsWith("<!--"))
   const source = ROOT.startsWith(homedir()) ? `~${ROOT.slice(homedir().length)}/memory` : `${ROOT}/memory`
-  const header = `<shared-agent-memory source="${source.replaceAll("\\", "/")}" detail-files="memory/topics/*.md" tools="memory_search,memory_read,memory_append">`
+  const header = `<shared-agent-memory source="${source.replaceAll("\\", "/")}" detail-files="memory/topics/*.md" tools="memory_search,memory_read,memory_append,memory_retain">`
   const footer = "</shared-agent-memory>"
-  const guidance = "\n\nShared cross-agent memory is injected automatically each session. Use `memory_search` to pull detail from memory/topics/*.md, `memory_read` to open one topic, and `memory_append` to record a new durable fact (one line in the index, detail in a topic). Keep the index lean."
+  const guidance = "\n\nShared cross-agent memory is injected automatically each session. Use `memory_search` to pull detail from memory/topics/*.md, `memory_read` to open one topic, and `memory_append` to record a new durable fact (one line in the index, detail in a topic). Keep the index lean. When Hindsight is enabled, `memory_retain` stores a dated fact there."
   const truncNote = `\n\n[index truncated at ~${MAX_BYTES} bytes — use memory_search for detail; prune stale facts to shrink the per-session tax]`
   // Reserve the fixed text (including the worst-case truncation note) so the whole
   // returned block — not just the index — stays within MAX_BYTES.
@@ -211,7 +217,7 @@ const searchTool = tool({
     limit: tool.schema.number().optional().describe("Max topics to return from the local fallback (default 5, max 10)"),
   },
   async execute(args, ctx) {
-    const { code, out } = await runStatus(process.execPath, [SEARCH, args.query, "--cwd", ctx.directory], { timeoutMs: 15000 })
+    const { code, out } = await runStatus(NODE, [SEARCH, args.query, "--cwd", ctx.directory], { timeoutMs: 15000 })
     if (code === 0 && out.trim()) return `Hindsight memory:\n\n${out.trim()}`
     const local = searchTopics(args.query, args.limit)
     return code === 1 ? `Hindsight had no match; local topics:\n\n${local}` : local
@@ -283,11 +289,31 @@ const appendTool = tool({
   },
 })
 
+const retainTool = tool({
+  description: "Record a durable fact in Hindsight long-term memory (only when the optional Hindsight backend is enabled; otherwise use memory_append). Retaining the same title replaces it; title a fix to a stale memory 'Correction: <topic>'. Pass the date the fact became true. Use global for cross-project facts, otherwise it goes to this repository's bank.",
+  args: {
+    title: tool.schema.string().describe("Short title, e.g. 'API deploy path' or 'Correction: retry policy'"),
+    content: tool.schema.string().describe("The fact and its evidence, self-contained"),
+    date: tool.schema.string().optional().describe("YYYY-MM-DD the fact became true (default today)"),
+    global: tool.schema.boolean().optional().describe("Cross-project fact: store in the global bank"),
+  },
+  async execute(args, ctx) {
+    const argv = [RETAIN, "--title", args.title, "--cwd", ctx.directory, "--agent", "opencode"]
+    if (args.date) argv.push("--date", args.date)
+    if (args.global) argv.push("--global")
+    argv.push(args.content)
+    const { code, out } = await runStatus(NODE, argv, { timeoutMs: 45000 })
+    if (code === 0) return out.trim()
+    if (code === 3) return "Hindsight is not enabled or unreachable; nothing was saved there. Use memory_append to record the fact in the markdown index."
+    return `memory_retain failed (exit ${code ?? "timeout"}). Check the title and content.`
+  },
+})
+
 const syncTool = tool({
   description: "Commit and push shared memory (and telemetry/leases) to the samebrain git remote right now. Normally runs automatically at session end.",
   args: {},
   async execute(_args, ctx) {
-    const out = await run(process.execPath, [SYNC, "--agent", "opencode"], {
+    const out = await run(NODE, [SYNC, "--agent", "opencode"], {
       env: { ...process.env, SAMEBRAIN_SESSION_ID: ctx.sessionID, SAMEBRAIN_CWD: ctx.directory },
       timeoutMs: 25000,
     })
@@ -311,7 +337,7 @@ export const SameBrainMemory: Plugin = async ({ directory, client }) => {
     if (!DO_PULL) return Promise.resolve("")
     let p = bootstrapped.get(id)
     if (!p) {
-      p = run(process.execPath, [RECALL], { env: { ...process.env, SAMEBRAIN_CWD: directory }, timeoutMs: 8000 })
+      p = run(NODE, [RECALL], { env: { ...process.env, SAMEBRAIN_CWD: directory }, timeoutMs: 8000 })
       bootstrapped.set(id, p)
     }
     return p
@@ -320,7 +346,7 @@ export const SameBrainMemory: Plugin = async ({ directory, client }) => {
   const persist = (id: string, cwd: string) => {
     if (!DO_PERSIST) return Promise.resolve("")
     lastPersist.set(id, Date.now())
-    return run(process.execPath, [SYNC, "--agent", "opencode"], {
+    return run(NODE, [SYNC, "--agent", "opencode"], {
       env: { ...process.env, SAMEBRAIN_SESSION_ID: id, SAMEBRAIN_CWD: cwd },
       timeoutMs: 25000,
     })
@@ -422,6 +448,7 @@ export const SameBrainMemory: Plugin = async ({ directory, client }) => {
       memory_search: searchTool,
       memory_read: readTool,
       memory_append: appendTool,
+      memory_retain: retainTool,
       memory_sync: syncTool,
     },
   }

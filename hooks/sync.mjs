@@ -2,10 +2,10 @@
 // Session-end sync: append one telemetry record, then commit + push memory/telemetry/lease
 // changes. Fail-silent, never blocks.
 //   sync.mjs --agent <claude|codex|cursor>   (agent name baked in by render.mjs)
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
-import { hostname } from 'node:os';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { homedir, hostname } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -40,6 +40,25 @@ try {
   };
   appendFileSync(join(dir, `${now.toISOString().slice(0, 7)}.jsonl`), `${JSON.stringify(record)}\n`);
 } catch { /* telemetry is best-effort */ }
+
+// Curated memory keeps flowing into Hindsight: Claude Code writes its auto-memory files on its own,
+// so each session end queues an incremental, ledgered backfill of the curated sources (unchanged
+// files cost nothing). Throttled to once per 10 minutes, detached so the hook never waits.
+try {
+  // Loaded lazily: copies of this hook that ship without the Hindsight client still sync git.
+  const { loadHindsight } = await import('./hindsight.mjs');
+  if (process.env.SAMEBRAIN_HINDSIGHT_SYNC !== '0' && loadHindsight(root)) {
+    const stamp = join(homedir(), '.hindsight', 'samebrain-memory-sync.json');
+    const due = !existsSync(stamp) || Date.now() - statSync(stamp).mtimeMs > 10 * 60000;
+    if (due) {
+      mkdirSync(dirname(stamp), { recursive: true });
+      writeFileSync(stamp, `${JSON.stringify({ at: new Date().toISOString() })}\n`);
+      spawn(process.execPath, [join(root, 'bin', 'hindsight-backfill.mjs'), '--sources', 'memory,claude-memory'], {
+        detached: true, stdio: 'ignore',
+      }).unref();
+    }
+  }
+} catch { /* memory sync is best-effort */ }
 
 const git = (args, timeout = 10000) =>
   execFileSync('git', args, { cwd: root, timeout, stdio: ['ignore', 'pipe', 'ignore'] })

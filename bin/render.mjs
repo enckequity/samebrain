@@ -144,7 +144,7 @@ const BLOCK_START = '<!-- samebrain:managed:start -->';
 const BLOCK_END = '<!-- samebrain:managed:end -->';
 const md = (p) => stripBom(read(p)).trim().replaceAll('{{REPO}}', REPO_DISPLAY);
 const HINDSIGHT_GUIDE = hindsight
-  ? `\n\n## Long-term memory (Hindsight)\n\nSession start injects a bounded \`<hindsight_memories>\` recall for the current repository next to the shared index, and Claude Code, Codex, Cursor and autonomous opencode conversations are captured to Hindsight automatically. Before assuming context is missing, search the long tail: \`node ${REPO_DISPLAY}/bin/memory-search.mjs "<question>"\` (this repository's bank plus the global bank; exit 3 means Hindsight is unreachable, so fall back to \`memory/topics/\`). Never paste secrets into a conversation: transcripts are retained.`
+  ? `\n\n## Long-term memory (Hindsight)\n\nSession start injects a bounded \`<hindsight_memories>\` recall for the current repository next to the shared index, and Claude Code, Codex, Cursor and autonomous opencode conversations are captured to Hindsight automatically. Before assuming context is missing, search the long tail: \`node ${REPO_DISPLAY}/bin/memory-search.mjs "<question>"\` (this repository's bank plus the global bank; exit 3 means Hindsight is unreachable, so fall back to \`memory/topics/\`). To store a dated fact directly: \`node ${REPO_DISPLAY}/bin/memory-retain.mjs --title "<title>" --date YYYY-MM-DD [--global] "<fact + evidence>"\` (the same title replaces it; title a fix \`Correction: <topic>\`). Never paste secrets into a conversation: transcripts are retained.`
   : '';
 const guardrails = `${md(join(ROOT, 'global', 'guardrails.md'))}${HINDSIGHT_GUIDE}`;
 const coordination = md(join(ROOT, 'global', 'coordination.md'));
@@ -533,7 +533,7 @@ if (existsSync(join(HOME, '.config', 'opencode'))) {
   if (existsSync(pluginsDir)) {
     for (const file of readdirSync(pluginsDir)) {
       if (!/\.(ts|js)$/.test(file)) continue;
-      const body = read(join(pluginsDir, file)).replaceAll('{{REPO}}', ROOT.replaceAll('\\', '/'));
+      const body = read(join(pluginsDir, file)).replaceAll('{{REPO}}', ROOT.replaceAll('\\', '/')).replaceAll('{{NODE}}', STABLE_NODE.replaceAll('\\', '/'));
       writeIfChanged(
         join(HOME, '.config', 'opencode', 'plugins', file),
         `// rendered by samebrain (bin/render.mjs) — edit plugins/${file} in the repo, not here\n${body}`,
