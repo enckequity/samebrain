@@ -790,6 +790,8 @@ const t = (name, cond) => {
   const ocPlugin = join(home4, '.config', 'opencode', 'plugins', 'samebrain-memory.ts');
   t('opencode gets the memory plugin', existsSync(ocPlugin));
   t('opencode plugin is marker-stamped', read(ocPlugin).includes('rendered by samebrain'));
+  t('opencode plugin spawns a real node binary, never its own executable', !read(ocPlugin).includes('{{NODE}}')
+    && /const NODE = process\.env\.SAMEBRAIN_NODE \?\? "\/[^"]+"/.test(read(ocPlugin)) && !/\(process\.execPath,/.test(read(ocPlugin)));
   t('opencode plugin resolves {{REPO}} to the repo', !read(ocPlugin).includes('{{REPO}}')
     && read(ocPlugin).includes(repo.replaceAll('\\', '/')));
   const ocPkg = JSON.parse(read(join(home4, '.config', 'opencode', 'package.json')));
@@ -1459,10 +1461,38 @@ const t = (name, cond) => {
   const resent = await backfill(['--resend']);
   t('backfill: --resend re-retains unchanged backfill documents', resent.status === 0
     && calls.slice(beforeResend).filter((c) => c.method === 'POST' && c.url.endsWith('/memories') && !c.url.includes('samebrain-canary-')).length === retained.length);
+  t('backfill: redaction canary runs at most once a day', !calls.slice(beforeResend).some((c) => c.url.includes('samebrain-canary-')));
   rmSync(join(bf, '.hindsight'), { recursive: true, force: true });
   banks.clear();
   const capped = await backfill(['--max-usd', '0.0001']);
   t('backfill: spend cap stops before sending', capped.stdout.includes('cap reached') && banks.size === 0);
+
+  // memory-retain: a dated document shaped like hindsight_ingest_document.
+  calls.length = 0;
+  const retainCli = (args, extra) => runAsync(join(repo, 'bin', 'memory-retain.mjs'), args, { env: hsEnv(extra), cwd: proj });
+  const noted = await retainCli(['--title', 'Correction: Retry Policy', '--date', '2026-09-10', '--global', '--agent', 'codex',
+    `4xx responses are not retried; key sk-ant-${'z'.repeat(30)} was rotated`]);
+  const note = calls.find((c) => c.method === 'POST' && c.url === '/v1/default/banks/global/memories')?.body;
+  t('memory-retain: a dated correction lands in the global bank under its title slug', noted.status === 0 && note?.items[0].document_id === 'correction-retry-policy'
+    && note.items[0].timestamp === '2026-09-10T00:00:00.000Z' && note.items[0].update_mode === 'replace' && note.items[0].tags.includes('harness:codex'));
+  t('memory-retain: content scrubbed and retried safely', !note.items[0].content.includes('zzzzzzzzzz')
+    && /^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(note.operation_id));
+  const repoNote = await retainCli(['--title', 'Deploy path', 'API ships via the deploy script']);
+  t('memory-retain: repository bank by default', repoNote.status === 0 && calls.some((c) => c.url === '/v1/default/banks/hs-project/memories'));
+  t('memory-retain: usage and offline exit codes', (await retainCli(['no title'])).status === 2
+    && (await retainCli(['--title', 'x', 'y'], { SAMEBRAIN_HINDSIGHT: '0' })).status === 3);
+  t('rulebook: agents are told how to retain a dated fact', read(join(hsHome, '.claude', 'CLAUDE.md')).includes('bin/memory-retain.mjs'));
+  // Session end queues the incremental curated-memory sync (detached, throttled).
+  const syncStamp = join(hsHome, '.hindsight', 'samebrain-memory-sync.json');
+  rmSync(syncStamp, { force: true });
+  calls.length = 0;
+  await runAsync(join(repo, 'hooks', 'sync.mjs'), ['--agent', 'claude'], { env: hsEnv(), input: '{}' });
+  for (let i = 0; i < 40 && !calls.some((c) => c.method === 'POST' && c.url.endsWith('/memories')); i += 1) await new Promise((r) => { setTimeout(r, 250); });
+  t('sync: session end queues the curated-memory backfill', existsSync(syncStamp) && calls.some((c) => c.method === 'POST' && c.url.endsWith('/memories')));
+  const stampedAt = statSync(syncStamp).mtimeMs;
+  await runAsync(join(repo, 'hooks', 'sync.mjs'), ['--agent', 'claude'], { env: hsEnv(), input: '{}' });
+  t('sync: the curated-memory backfill is throttled', statSync(syncStamp).mtimeMs === stampedAt);
+  await new Promise((r) => { setTimeout(r, 3000); }); // let the detached backfill finish before the server closes
 
   // Outage: an unreachable server must not delay session start past the recall cap.
   await new Promise((r) => { server.close(r); server.closeAllConnections?.(); });
