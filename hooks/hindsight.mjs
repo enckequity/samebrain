@@ -50,7 +50,7 @@ const real = (p) => { try { return realpathSync(p); } catch { return p; } };
 export function repoName(dir) {
   try {
     const common = execFileSync('git', ['-C', dir, 'rev-parse', '--path-format=absolute', '--git-common-dir'], {
-      timeout: 3000, stdio: ['ignore', 'pipe', 'ignore'],
+      timeout: 3000, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true,
     }).toString().trim();
     if (!common) return null;
     const name = basename(common);
