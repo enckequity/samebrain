@@ -131,7 +131,7 @@ const recent = (p) => { try { return statSync(p).mtimeMs >= cutoff; } catch { re
 const mtimeIso = (p) => new Date(statSync(p).mtimeMs).toISOString();
 // Last commit time for a tracked, unmodified file; otherwise its mtime (uncommitted edits are newer).
 function fileTimestamp(file) {
-  const git = (args) => execFileSync('git', ['-C', dirname(file), ...args], { timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim();
+  const git = (args) => execFileSync('git', ['-C', dirname(file), ...args], { timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true }).toString().trim();
   try {
     if (!git(['status', '--porcelain', '--', basename(file)])) {
       const committed = git(['log', '-1', '--format=%cI', '--', basename(file)]);
