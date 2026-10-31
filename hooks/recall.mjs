@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Session-start memory recall: fast git pull (fail-silent), then emit the memory index plus,
+// Session-start memory recall: non-destructive git sync, then emit the memory index plus,
 // when Hindsight is configured, a bounded recall for this repository's bank and the global bank.
 // Plain stdout for Claude Code / Codex (stdout -> context). `--cursor` wraps in
 // Cursor's sessionStart JSON contract ({ additional_context }).
@@ -9,6 +9,8 @@ import { existsSync, readFileSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { repairPluginCache } from '../bin/repair-codex-plugin-hooks.mjs';
+import {syncGit,syncWarning} from './git-sync.mjs';
 import {
   ageLabel, bankForCwd, claimRecall, formatResults, loadHindsight, readPages, readRecallCache, recall, releaseRecall,
   writeRecallCache,
@@ -16,6 +18,13 @@ import {
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const home = homedir();
+
+// Plugin updates replace cached hooks independently of samebrain's git HEAD.
+// Reconcile on every Windows session start, even when no render is due.
+if (process.platform === 'win32') {
+  try { repairPluginCache(); }
+  catch (error) { process.stderr.write(`samebrain: Windows plugin hook repair failed: ${error.message}\n`); }
+}
 
 // The recall a session start sends for one bank: its own query for a repository, the cross-project
 // query for the global bank.
@@ -51,31 +60,25 @@ const display = root.startsWith(home)
   ? `~${root.slice(home.length).replaceAll('\\', '/')}`
   : root.replaceAll('\\', '/');
 
-try {
-  execFileSync('git', ['pull', '--rebase', '--autostash', '--quiet'], {
-    cwd: root, timeout: 8000, stdio: ['ignore', 'ignore', 'ignore'],
-  });
-} catch {
-  // Offline or a conflicted rebase. A rebase left in progress would wedge every later
-  // git op on this repo — abort it and serve the local copy. Fail-silent.
-  try {
-    execFileSync('git', ['rebase', '--abort'], {
-      cwd: root, timeout: 5000, stdio: ['ignore', 'ignore', 'ignore'],
-    });
-  } catch { /* no rebase in progress */ }
-}
+const syncNotice=syncWarning(syncGit(root));
+if(syncNotice)process.stderr.write(syncNotice+'\n');
 
 // Rebase pulls never fire the post-merge auto-render hook: re-render whenever HEAD
 // has moved past the last rendered revision, so engine updates land on every machine
-// at the next session start with no manual step. Best-effort, silent.
+// at the next session start with no manual step. A machine activated with --memory-only keeps
+// using the scoped renderer; other machines retain the normal full sync. Best-effort, silent.
 try {
+  let memoryOnly = false;
+  try { memoryOnly = readFileSync(join(home, '.hindsight', 'samebrain-render-mode'), 'utf8').trim() === 'memory-only'; }
+  catch { /* normal full-render mode */ }
   const head = execFileSync('git', ['rev-parse', 'HEAD'], {
     cwd: root, timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'],
   }).toString().trim();
   let last = '';
-  try { last = readFileSync(join(root, 'backups', '.last-render-head'), 'utf8').trim(); } catch { /* never rendered */ }
+  const marker = memoryOnly ? '.last-memory-render-head' : '.last-render-head';
+  try { last = readFileSync(join(root, 'backups', marker), 'utf8').trim(); } catch { /* never rendered */ }
   if (head && head !== last) {
-    execFileSync(process.execPath, [join(root, 'bin', 'render.mjs')], {
+    execFileSync(process.execPath, [join(root, 'bin', 'render.mjs'), ...(memoryOnly ? ['--memory-only'] : [])], {
       cwd: root, timeout: 30000, stdio: ['ignore', 'ignore', 'ignore'],
     });
   }
@@ -96,9 +99,10 @@ const indexBytes = Buffer.byteLength(index, 'utf8');
 const over = [];
 if (factLines > CAP_LINES) over.push(`${factLines} non-blank lines (cap ${CAP_LINES})`);
 if (indexBytes > CAP_BYTES) over.push(`${indexBytes} bytes (cap ${CAP_BYTES})`);
-const warn = over.length
+const budgetWarning = over.length
   ? `\n\nWARNING: memory index over budget: ${over.join('; ')}. Prune now: merge stale facts into memory/topics/*.md or delete them.`
   : '';
+const warn=budgetWarning+(syncNotice?`\n\nWARNING: ${syncNotice}`:'');
 
 // Hook payloads carry the session directory (Claude/Codex: cwd, Cursor: workspace_roots).
 let payload = {};
@@ -148,7 +152,7 @@ if (hs) {
     const due = (held.includes(b) && !fresh) || (stale && Date.now() - Date.parse(stale.at) > (cfg.revalidateAfterMs ?? 300000));
     if (due && process.env.SAMEBRAIN_HINDSIGHT_REVALIDATE !== '0') {
       try {
-        spawn(process.execPath, [fileURLToPath(import.meta.url), '--refresh-recall', b], { detached: true, stdio: 'ignore' }).unref();
+        spawn(process.execPath, [fileURLToPath(import.meta.url), '--refresh-recall', b], { detached: true, stdio: 'ignore', windowsHide: true }).unref();
       } catch { /* revalidation is best-effort */ }
     }
     if (!source) continue;
@@ -161,14 +165,14 @@ if (hs) {
     recalled = `\n\n<hindsight_memories source="samebrain" bank="${bank}" global-bank="${hs.settings.globalBank}" search="node ${display}/bin/memory-search.mjs '<query>'">`
       + `${pages ? `\n## Knowledge pages\n${pages}` : ''}${sections.join('')}\n</hindsight_memories>`;
   }
-  // Delta pages drift over many incremental refreshes; bin/hindsight-banks.mjs --maintain clears and
-  // rebuilds them when due (48h). Detached so the session never waits on it.
+  // Optional delta-page maintenance is opt-in because clearing and rebuilding pages invokes the
+  // paid model. When enabled, it runs detached so the session never waits on it.
   try {
     const stamp = join(homedir(), '.hindsight', 'samebrain-pages-maintained.json');
     // The stamp is written when the pages are set up, so fresh pages are never cleared.
     const due = existsSync(stamp) && Date.now() - statSync(stamp).mtimeMs > (hs.settings.bankSetup?.clearEveryHours ?? 48) * 3600000;
-    if (due && hs.settings.bankSetup && process.env.SAMEBRAIN_HINDSIGHT_MAINTAIN !== '0') {
-      spawn(process.execPath, [join(root, 'bin', 'hindsight-banks.mjs'), '--maintain'], { detached: true, stdio: 'ignore' }).unref();
+    if (due && hs.settings.bankSetup?.autoMaintain === true && process.env.SAMEBRAIN_HINDSIGHT_MAINTAIN !== '0') {
+      spawn(process.execPath, [join(root, 'bin', 'hindsight-banks.mjs'), '--maintain'], { detached: true, stdio: 'ignore', windowsHide: true }).unref();
     }
   } catch { /* maintenance is best-effort */ }
 }

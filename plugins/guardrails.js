@@ -7,16 +7,22 @@
 //   - conventional commits, no AI attribution, no hook-skipping / empty commits
 //   - no force-push, no git config rewrites
 //   - no staging of secret files (explicit paths and broad `add -A`)
+//   - secret-prone commands are filtered before opencode streams output,
+//     and final tool output is scrubbed with the shared redaction rules
 //
 // Env knobs:
 //   SAMEBRAIN_GUARDRAILS=0   load no checks
+//   SAMEBRAIN_REDACT=0       keep tool output unredacted
 //
 // Pure decisioning lives in evaluateCommand/secretPathInStatus; the default export
 // stays thin so the whole plugin can be driven by the test suite without opencode.
 
 import { execFileSync } from "node:child_process"
+import { scrub } from "{{REPO_URL}}/hooks/hindsight.mjs"
+import { isSecretProne, wrapCommand, wrapPowerShell } from "{{REPO_URL}}/hooks/redact-hook.mjs"
 
 const DISABLED = process.env.SAMEBRAIN_GUARDRAILS === "0"
+const REDACT = process.env.SAMEBRAIN_REDACT !== "0"
 
 const CONVENTIONAL = /^(feat|fix|refactor|docs|test|chore|perf|ci|build|style|revert|mem|memory|render|release)(\([^)]+\))?!?: .+/
 const AI_ATTRIBUTION = /(co-authored-by:.*(claude|gpt|copilot|codex|cursor|opencode|kimi|devin|\bai\b)|generated with .*(claude|opencode|codex|cursor|kimi)|\u{1F916})/iu
@@ -149,9 +155,25 @@ function broadAddWouldStageSecret(command, cwd) {
   return null
 }
 
+// The tool ID is "bash" whatever shell opencode runs. Mirror its pick in 1.18.31
+// (core/src/shell.ts): config.shell, else $SHELL, else pwsh/powershell on Windows,
+// zsh on macOS, bash elsewhere. Returns the wrapper for that shell, or null.
+// shortcut: if opencode rejects a configured shell and falls back, the wrapper fails
+// the command instead of leaking; mirror its resolve() if that ever bites.
+function wrapperFor(configShell) {
+  const shell = configShell || process.env.SHELL ||
+    (process.platform === "win32" ? "pwsh" : process.platform === "darwin" ? "zsh" : "bash")
+  const name = shell.split(/[\\/]/).at(-1).toLowerCase().replace(/\.exe$/, "")
+  if (["bash", "zsh", "ksh"].includes(name)) return wrapCommand
+  if (["pwsh", "powershell"].includes(name)) return wrapPowerShell
+  return null
+}
+
 async function guardrails({ directory }) {
   if (DISABLED) return {}
+  let wrap = wrapperFor()
   return {
+    config: async (config) => { wrap = wrapperFor(config?.shell) },
     "tool.execute.before": async (input, output) => {
       if (input.tool !== "bash") return
       const command = output?.args?.command
@@ -161,10 +183,26 @@ async function guardrails({ directory }) {
       if (hit) throw new Error(hit.reason)
 
       const cwd = output?.args?.workdir ?? directory
-      if (!cwd) return
-      const offender = broadAddWouldStageSecret(command, cwd)
+      const offender = cwd && broadAddWouldStageSecret(command, cwd)
       if (offender) {
         throw new Error(`Blocked: \`git add\` would stage a credential-looking path (${offender}). Keep secrets out of git and add specific files instead.`)
+      }
+
+      if (REDACT && isSecretProne(command)) {
+        if (!wrap) {
+          throw new Error("Blocked: output redaction needs bash, zsh, ksh, pwsh or powershell. Set opencode's `shell` to one of them before running a secret-prone command.")
+        }
+        // OpenCode is a Bun executable, so process.execPath is not a Node runner.
+        output.args.command = wrap(command, "node")
+      }
+    },
+    // This covers final tool results. Streamed shell metadata is recorded earlier,
+    // so secret-prone commands also need the before-hook's output filter.
+    "tool.execute.after": async (_input, output) => {
+      if (!REDACT || !output) return
+      if (typeof output.output === "string") output.output = scrub(output.output, { credentialsOnly: true })
+      if (typeof output.metadata?.output === "string") {
+        output.metadata.output = scrub(output.metadata.output, { credentialsOnly: true })
       }
     },
   }

@@ -3,6 +3,7 @@
 //   node bin/status.mjs
 import { execFileSync } from 'node:child_process';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -12,6 +13,46 @@ const jsonl = (p) => readFileSync(p, 'utf8').split('\n').filter(Boolean).flatMap
 });
 
 console.log('samebrain status\n');
+
+// Use local refs only: status must work offline and leave shared work untouched.
+const git = (args) => execFileSync('git', args, {
+  cwd: ROOT, timeout: 5000, encoding: 'utf8', windowsHide: true,
+  env: { ...process.env, GIT_OPTIONAL_LOCKS: '0' }, stdio: ['ignore', 'pipe', 'ignore'],
+}).trim();
+try {
+  const branch = git(['branch', '--show-current']) || 'detached HEAD';
+  const dirty = git(['status', '--porcelain', '--no-renames', '-z']).split('\0').filter(Boolean).length;
+  let upstream = 'upstream unavailable';
+  try {
+    const [ahead, behind] = git(['rev-list', '--left-right', '--count', 'HEAD...@{upstream}']).split(/\s+/);
+    upstream = `${ahead} ahead, ${behind} behind (last fetched)`;
+  } catch { /* No upstream, or its history cannot be read. */ }
+  console.log(`  git: ${branch}, ${upstream}, ${dirty} uncommitted path(s)`);
+} catch {
+  console.log('  git: unavailable; inspect repository access and Git object health');
+}
+
+// Show timestamps only. Cached memory can contain private project details.
+const recallDir = join(homedir(), '.hindsight', 'samebrain-recall-cache');
+let caches = null;
+try {
+  caches = existsSync(recallDir) ? readdirSync(recallDir).filter((f) => f.endsWith('.json')) : [];
+} catch {
+  console.log('  recall: cache directory unavailable; inspect local file access');
+}
+if (caches?.length === 0) console.log('  recall: no local cache (Hindsight may be disabled or not yet used)');
+for (const file of caches ?? []) {
+  const bank = file.slice(0, -5).replace(/[\p{Cc}\p{Zl}\p{Zp}]/gu, '?').slice(0, 100);
+  try {
+    const { at } = JSON.parse(readFileSync(join(recallDir, file), 'utf8'));
+    const age = Date.now() - Date.parse(at);
+    if (typeof at !== 'string' || !Number.isFinite(age) || age < 0) throw new Error('invalid timestamp');
+    const label = age >= 86400000 ? `${Math.floor(age / 86400000)}d ago` : `${Math.floor(age / 60000)}m ago`;
+    console.log(`  recall ${bank}: ${age >= 86400000 ? 'STALE' : 'fresh'}, last refreshed ${label}`);
+  } catch {
+    console.log(`  recall ${bank}: invalid cache; run memory-search to check live recall`);
+  }
+}
 
 // Machines: telemetry dirs, current-month session counts, last record, last git-synced commit.
 const telemetryRoot = join(ROOT, 'telemetry');

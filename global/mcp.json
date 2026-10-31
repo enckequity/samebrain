@@ -12,7 +12,7 @@
       "targets": ["claude", "cursor"],
       "type": "http",
       "url": "https://mcp.exa.ai/mcp",
-      "headers": { "Authorization": "Bearer op://Work/Exa API Key/credential" }
+      "headers": { "Authorization": "Bearer op://vault/item/field" }
     },
     "local-stdio-server": {
       "targets": ["claude", "cursor"],

@@ -21,11 +21,24 @@ export const enabled = (env = process.env, argv = process.argv) => {
   return env.AUTO_CONTINUE === '1' || Boolean(env.AGENTDECK_IDENTITY_FILE || env.AGENTDECK_INSTANCE_ID);
 };
 
+// Accepts agent-deck's own completion sentinel, `===AGENTDECK_DONE=== status=<ok|fail> summary=<text>`,
+// by mirroring agent-deck's ParseDoneSentinel (status token must be ok|fail). Without this a
+// `launch --assert-done` worker finishes as "waiting" to agent-deck and is nudged forever by the hook.
+const isDoneSentinel = (line) => {
+  const marker = line.indexOf(DONE);
+  if (marker < 0) return false;
+  const rest = line.slice(marker + DONE.length).trim();
+  const at = rest.indexOf('status=');
+  if (at < 0) return false;
+  const status = rest.slice(at + 'status='.length).split(/[ \t]/)[0].toLowerCase();
+  return status === 'ok' || status === 'fail';
+};
+
 // Only the last non-empty line counts, so quoting a marker mid-message does not end the run.
 export const isTerminal = (text) => {
   if (typeof text !== 'string') return false;
   const last = text.trimEnd().split('\n').pop().trim();
-  return last === DONE || /^(BLOCKED|WAITING):\s*\S/.test(last);
+  return last === DONE || isDoneSentinel(last) || /^(BLOCKED|WAITING):\s*\S/.test(last);
 };
 
 export const CONTRACT = [

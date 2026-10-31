@@ -2,6 +2,7 @@
 // One-time Hindsight activation for THIS machine, after setting "enabled": true in
 // global/hindsight.json and putting HINDSIGHT_API_URL and HINDSIGHT_API_KEY in secrets.env. Idempotent; re-run after bumping versions in global/hindsight.json.
 //   node bin/hindsight-activate.mjs            stage runtime, retire the old Claude plugin, render
+//   node bin/hindsight-activate.mjs --memory-only  render only shared memory surfaces on this machine
 //   node bin/hindsight-activate.mjs --check    report what is missing, change nothing
 //
 // 1. Stages the pinned @vectorize-io/hindsight-coding-agents tarball into ~/.hindsight/coding-agents
@@ -21,6 +22,7 @@ import { hindsightRequest, loadHindsight } from '../hooks/hindsight.mjs';
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const CHECK = process.argv.includes('--check');
+const MEMORY_ONLY = process.argv.includes('--memory-only');
 const HOME = homedir();
 const expand = (p) => (p === '~' ? HOME : p.startsWith('~/') ? join(HOME, p.slice(2)) : p);
 const fail = (msg) => { console.error(`hindsight-activate: ${msg}`); process.exit(1); };
@@ -50,9 +52,11 @@ if (staged === ca.version) {
 } else {
   const work = mkdtempSync(join(tmpdir(), 'samebrain-hindsight-'));
   try {
-    execFileSync('npm', ['pack', `${ca.package}@${ca.version}`, '--pack-destination', work, '--silent'], {
-      stdio: ['ignore', 'ignore', 'inherit'], timeout: 120000,
-    });
+    const npmArgs = ['pack', `${ca.package}@${ca.version}`, '--pack-destination', work, '--silent'];
+    // npm is a .cmd shim on Windows, which execFileSync cannot launch directly (ENOENT/EINVAL).
+    const npmCommand = process.platform === 'win32' ? (process.env.ComSpec || 'cmd.exe') : 'npm';
+    const npmCommandArgs = process.platform === 'win32' ? ['/d', '/s', '/c', 'npm', ...npmArgs] : npmArgs;
+    execFileSync(npmCommand, npmCommandArgs, { stdio: ['ignore', 'ignore', 'inherit'], timeout: 120000 });
     const tgz = readdirSync(work).find((f) => f.endsWith('.tgz'));
     if (!tgz) fail('npm pack produced no tarball');
     const digest = `sha512-${createHash('sha512').update(readFileSync(join(work, tgz))).digest('base64')}`;
@@ -96,7 +100,7 @@ if (CHECK) {
 }
 
 // ---- 3. render wires hooks now that the runtime exists, then the server-side bank setup ----
-const render = spawnSync(process.execPath, [join(ROOT, 'bin', 'render.mjs')], { stdio: 'inherit' });
+const render = spawnSync(process.execPath, [join(ROOT, 'bin', 'render.mjs'), MEMORY_ONLY ? '--memory-only' : '--full'], { stdio: 'inherit' });
 if (render.status !== 0) process.exit(render.status ?? 1);
 const banks = spawnSync(process.execPath, [join(ROOT, 'bin', 'hindsight-banks.mjs')], { stdio: 'inherit' });
 process.exit(banks.status ?? 1);
