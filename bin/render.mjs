@@ -2,6 +2,8 @@
 // Render canonical agent config to per-agent global files on THIS machine. Idempotent.
 //   node bin/render.mjs                     apply
 //   node bin/render.mjs --check             report drift, write nothing
+//   node bin/render.mjs --memory-only       update memory instructions/hooks/config/MCP only
+//   node bin/render.mjs --full              leave persisted memory-only mode and apply everything
 //   node bin/render.mjs --gc                roll old telemetry months into archive lines + prune dead leases
 //   node bin/render.mjs --ack-cursor-rules  record that Cursor User Rules match global/cursor-user-rules.md
 //
@@ -29,18 +31,35 @@ import {
 } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { codexHookCommand, hookCommandSource } from './codex-hook-command.mjs';
+import { repairPluginCache } from './repair-codex-plugin-hooks.mjs';
+import { stableNode } from './stable-node.mjs';
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const HOME = homedir();
 const CHECK = process.argv.includes('--check');
 const GC = process.argv.includes('--gc');
 const ACK = process.argv.includes('--ack-cursor-rules');
+const FORCE_FULL = process.argv.includes('--full');
+const RENDER_MODE_FILE = join(HOME, '.hindsight', 'samebrain-render-mode');
+let savedMemoryOnly = false;
+try { savedMemoryOnly = readFileSync(RENDER_MODE_FILE, 'utf8').trim() === 'memory-only'; } catch { /* default full sync */ }
+const MEMORY_ONLY = process.argv.includes('--memory-only') || (!FORCE_FULL && savedMemoryOnly);
 const read = (p) => readFileSync(p, 'utf8');
 const stripBom = (s) => (s.charCodeAt(0) === 0xFEFF ? s.slice(1) : s); // tolerate editor BOMs
 const readJson = (p) => JSON.parse(stripBom(read(p)));
 const fail = (msg) => { console.error(`render: ${msg}`); process.exit(1); };
 const changes = [];
+
+// A linked worktree (its .git is a file) would write its own path into every global hook,
+// MCP and {{REPO}} reference. core.hooksPath is shared, so post-merge fires in task worktrees
+// too. Render from the main checkout; --from-worktree is the deliberate override.
+const IS_LINKED_WORKTREE = (() => { try { return statSync(join(ROOT, '.git')).isFile(); } catch { return false; } })();
+if (IS_LINKED_WORKTREE && !CHECK && !process.argv.includes('--from-worktree')) {
+  console.error(`render: ${ROOT} is a linked worktree; skipped so global config keeps pointing at the main checkout. Render from the main checkout, or pass --from-worktree to override.`);
+  process.exit(0);
+}
 
 // Repo path as agents should see it (used for the {{REPO}} token in markdown).
 const REPO_DISPLAY = ROOT.startsWith(HOME)
@@ -106,22 +125,18 @@ const hindsight = (() => {
 // Node binary written into hook and MCP commands. Never process.execPath: render runs under
 // different binaries (a session's node, the git hook's PATH node), and every flip rewrote every
 // hook command — which also revoked Codex's per-command hook trust on each pull. Preference:
-// SAMEBRAIN_NODE, ~/.local/bin/node, then `command -v node` from a login shell.
-const STABLE_NODE = (() => {
-  const executable = (p) => { try { return statSync(p).isFile(); } catch { return false; } };
-  for (const candidate of [process.env.SAMEBRAIN_NODE, join(HOME, '.local', 'bin', 'node')]) {
-    if (candidate && executable(candidate)) return candidate;
+// SAMEBRAIN_NODE, ~/.local/bin/node(.exe), then the PATH node (`command -v node` from a login
+// shell, or `where node` on Windows).
+const STABLE_NODE = stableNode();
+
+// Reconcile plugin cache drift on render/check, including memory-only installs.
+if (process.platform === 'win32') {
+  try {
+    repairPluginCache({ node: STABLE_NODE, check: CHECK, report: (label) => changes.push(`codex: ${label}`) });
+  } catch (error) {
+    console.error(`render: skipped the Windows plugin hook repair (${error.message}); the rest still renders.`);
   }
-  if (process.platform !== 'win32') {
-    try {
-      const found = execFileSync(process.env.SHELL || '/bin/sh', ['-lc', 'command -v node'], {
-        timeout: 10000, stdio: ['ignore', 'pipe', 'ignore'],
-      }).toString().trim().split('\n').pop();
-      if (found?.startsWith('/') && executable(found)) return found;
-    } catch { /* no login shell or node not on its PATH */ }
-  }
-  return process.execPath;
-})();
+}
 
 // The pinned coding-agents runtime, once bin/hindsight-activate.mjs staged it: hooks and MCP
 // servers pointing at a missing file would error every session, so wiring waits for it.
@@ -143,9 +158,12 @@ const MARKER = '<!-- rendered by samebrain (bin/render.mjs) — edit global/*.md
 const BLOCK_START = '<!-- samebrain:managed:start -->';
 const BLOCK_END = '<!-- samebrain:managed:end -->';
 const md = (p) => stripBom(read(p)).trim().replaceAll('{{REPO}}', REPO_DISPLAY);
-const HINDSIGHT_GUIDE = hindsight
-  ? `\n\n## Long-term memory (Hindsight)\n\nSession start injects a bounded \`<hindsight_memories>\` recall for the current repository next to the shared index, and Claude Code, Codex, Cursor and autonomous opencode conversations are captured to Hindsight automatically. Before assuming context is missing, search the long tail: \`node ${REPO_DISPLAY}/bin/memory-search.mjs "<question>"\` (this repository's bank plus the global bank; exit 3 means Hindsight is unreachable, so fall back to \`memory/topics/\`). To store a dated fact directly: \`node ${REPO_DISPLAY}/bin/memory-retain.mjs --title "<title>" --date YYYY-MM-DD [--global] "<fact + evidence>"\` (the same title replaces it; title a fix \`Correction: <topic>\`). Never paste secrets into a conversation: transcripts are retained.`
+const HINDSIGHT_GUIDE_START = '<!-- samebrain:hindsight:start -->';
+const HINDSIGHT_GUIDE_END = '<!-- samebrain:hindsight:end -->';
+const HINDSIGHT_GUIDE_BODY = hindsight
+  ? `## Long-term memory (Hindsight)\n\nSession start injects a bounded \`<hindsight_memories>\` recall for the current repository next to the shared index, and Claude Code, Codex, Cursor and autonomous opencode conversations are captured to Hindsight automatically. During a task, run \`node ${REPO_DISPLAY}/bin/memory-search.mjs "<question>"\` when a past decision, recurring error or unfamiliar system could change what you do; skip it for routine work. It searches this repository's bank plus the global bank, and falls back to \`memory/topics/\` when Hindsight is off or unreachable. To store a dated fact directly: \`node ${REPO_DISPLAY}/bin/memory-retain.mjs --title "<title>" --date YYYY-MM-DD [--global] "<fact + evidence>"\` (the same title replaces it; title a fix \`Correction: <topic>\`). Never paste secrets into a conversation: transcripts are retained.`
   : '';
+const HINDSIGHT_GUIDE = HINDSIGHT_GUIDE_BODY ? `\n\n${HINDSIGHT_GUIDE_START}\n${HINDSIGHT_GUIDE_BODY}\n${HINDSIGHT_GUIDE_END}` : '';
 const guardrails = `${md(join(ROOT, 'global', 'guardrails.md'))}${HINDSIGHT_GUIDE}`;
 const coordination = md(join(ROOT, 'global', 'coordination.md'));
 const addendum = (name) => {
@@ -208,20 +226,53 @@ function reconcileLegacyCodexSkill(name, current, shared) {
   rmSync(target);
 }
 
+function updateMemoryGuide(target, label) {
+  if (!existsSync(target)) return;
+  const live = read(target);
+  if (!live.startsWith(MARKER)) return; // memory-only mode never rewrites an unmanaged file
+  const block = `${HINDSIGHT_GUIDE_START}\n${HINDSIGHT_GUIDE_BODY}\n${HINDSIGHT_GUIDE_END}`;
+  const markedStart = live.indexOf(HINDSIGHT_GUIDE_START);
+  const markedEnd = live.indexOf(HINDSIGHT_GUIDE_END);
+  let next = live;
+  if (markedStart >= 0 && markedEnd > markedStart) {
+    next = `${live.slice(0, markedStart)}${block}${live.slice(markedEnd + HINDSIGHT_GUIDE_END.length)}`;
+  } else {
+    // One-time migration from the unmarked guide used before scoped memory rollout existed.
+    const oldStart = live.indexOf('\n\n## Long-term memory');
+    const boundary = live.indexOf('\n\n# Multi-Agent Work Coordination', Math.max(0, oldStart));
+    if (oldStart >= 0 && boundary >= 0) {
+      next = `${live.slice(0, oldStart)}\n\n${block}${live.slice(boundary)}`;
+    } else if (boundary >= 0) {
+      next = `${live.slice(0, boundary)}\n\n${block}${live.slice(boundary)}`;
+    } else {
+      next = `${live.trimEnd()}\n\n${block}\n`;
+    }
+  }
+  writeIfChanged(target, next, label);
+}
+
 // ---- 1. Codex global instructions -------------------------------------------------
-writeIfChanged(
-  join(HOME, '.codex', 'AGENTS.md'),
-  `${MARKER}\n\n${guardrails}\n\n${coordination}${addendum('codex')}\n`,
-  'codex: ~/.codex/AGENTS.md',
-);
+if (MEMORY_ONLY) {
+  updateMemoryGuide(join(HOME, '.codex', 'AGENTS.md'), 'codex: ~/.codex/AGENTS.md Hindsight guide');
+} else {
+  writeIfChanged(
+    join(HOME, '.codex', 'AGENTS.md'),
+    `${MARKER}\n\n${guardrails}\n\n${coordination}${addendum('codex')}\n`,
+    'codex: ~/.codex/AGENTS.md',
+  );
+}
 
 // ---- 2. Claude global instructions ------------------------------------------------
 const rtk = existsSync(join(HOME, '.claude', 'RTK.md')) ? '\n\n@RTK.md' : '';
-writeIfChanged(
-  join(HOME, '.claude', 'CLAUDE.md'),
-  `${MARKER}\n\n${guardrails}\n\n${coordination}${addendum('claude')}${rtk}\n`,
-  'claude: ~/.claude/CLAUDE.md',
-);
+if (MEMORY_ONLY) {
+  updateMemoryGuide(join(HOME, '.claude', 'CLAUDE.md'), 'claude: ~/.claude/CLAUDE.md Hindsight guide');
+} else {
+  writeIfChanged(
+    join(HOME, '.claude', 'CLAUDE.md'),
+    `${MARKER}\n\n${guardrails}\n\n${coordination}${addendum('claude')}${rtk}\n`,
+    'claude: ~/.claude/CLAUDE.md',
+  );
+}
 
 // ---- 2b. Gemini CLI / Copilot CLI — rendered only where the agent is installed ------
 // No session hooks wired for these yet, so their instructions carry a memory-bootstrap
@@ -231,7 +282,10 @@ const MEMORY_BOOTSTRAP = `\n\n## Memory bootstrap\n\nAt the start of each sessio
 // opencode has the samebrain plugin (plugins/samebrain-memory.ts): it injects a
 // bounded index automatically and commits/pushes at session end, so its bootstrap
 // points at the retrieval tools instead of asking the model to read the file.
-const PLUGIN_MEMORY_BOOTSTRAP = `\n\n## Memory bootstrap\n\nShared cross-agent memory is injected automatically by the samebrain opencode plugin — a \`<shared-agent-memory>\` index arrives in your system context each session and updates are committed and pushed at session end. Use \`memory_search\` to pull detail from \`${REPO_DISPLAY}/memory/topics/*.md\` on demand, \`memory_read\` to open a topic, and \`memory_append\` to record a new durable fact (one line, optional topic detail). Keep the index lean.`;
+const PLUGIN_MEMORY_BOOTSTRAP = hindsight
+  ? `\n\n## Memory bootstrap\n\nThe samebrain opencode plugin injects the core index and Hindsight memory into your system context each session. Use \`memory_search\` before assuming context is missing, \`memory_read\` to open an archived topic, and \`memory_retain\` to record a durable fact in Hindsight.`
+  : `\n\n## Memory bootstrap\n\nThe samebrain opencode plugin injects the core index into your system context each session. Use \`memory_search\` before assuming context is missing, \`memory_read\` to open a topic, and \`memory_append\` to record a durable fact (one line in the index, detail in memory/topics/).`;
+if (!MEMORY_ONLY) {
 if (existsSync(join(HOME, '.gemini'))) {
   writeIfChanged(
     join(HOME, '.gemini', 'GEMINI.md'),
@@ -278,6 +332,7 @@ if (existsSync(join(HOME, '.openclaw'))) {
     'openclaw: ~/.openclaw/workspace/AGENTS.md managed block',
   );
 }
+}
 
 // ---- 3. MCP ------------------------------------------------------------------------
 const opCache = new Map();
@@ -312,32 +367,38 @@ function resolveSecrets(value, server) {
 const mcpConfig = readJson(join(ROOT, 'global', 'mcp.json'));
 const canonical = mcpConfig.mcpServers ?? {};
 const retired = mcpConfig.retiredMcpServers ?? [];
+// {{REPO}} and {{NODE}} let a local server point at this checkout's scripts on any machine.
+const pathTokens = (value) => JSON.parse(JSON.stringify(value)
+  .replaceAll('{{REPO}}', ROOT.replaceAll('\\', '/'))
+  .replaceAll('{{NODE}}', STABLE_NODE.replaceAll('\\', '/')));
 const serverFor = (name, def) => {
   const { targets, os, win, rendered_name, _comment, ...base } = def;
   const eff = process.platform === 'win32' && win ? { ...base, ...win } : base;
-  return resolveSecrets(eff, name);
+  return resolveSecrets(pathTokens(eff), name);
 };
 // Hindsight's coding-agents MCP server (knowledge pages, reflect, ingest) for the agents whose
 // sessions it serves. Resolves its bank from the directory the host starts it in.
-const HINDSIGHT_MCP_HARNESS = { claude: 'claude-code', cursor: 'cursor-cli' };
+const HINDSIGHT_MCP_HARNESS = { claude: 'claude-code', codex: 'codex', cursor: 'cursor-cli' };
 const hindsightMcp = (agent) => (hindsightRuntime?.ready && HINDSIGHT_MCP_HARNESS[agent]
   ? { hindsight: { command: STABLE_NODE, args: [join(hindsightRuntime.dir, 'dist', 'mcp-server.js')], env: { HINDSIGHT_MCP_HARNESS: HINDSIGHT_MCP_HARNESS[agent] } } }
   : {});
 const wanted = (agent) => ({
-  ...Object.fromEntries(
+  ...(!MEMORY_ONLY ? Object.fromEntries(
     Object.entries(canonical)
       .filter(([, d]) => d.targets.includes(agent) && (!d.os || d.os.includes(process.platform)))
       .map(([name, d]) => [d.rendered_name ?? name, serverFor(name, d)]),
-  ),
+  ) : {}),
   ...hindsightMcp(agent),
 });
 
 // 3a. Cursor: full ownership of ~/.cursor/mcp.json
-writeIfChanged(
-  join(HOME, '.cursor', 'mcp.json'),
-  `${JSON.stringify({ mcpServers: wanted('cursor') }, null, 2)}\n`,
-  'cursor: ~/.cursor/mcp.json',
-);
+if (!MEMORY_ONLY) {
+  writeIfChanged(
+    join(HOME, '.cursor', 'mcp.json'),
+    `${JSON.stringify({ mcpServers: wanted('cursor') }, null, 2)}\n`,
+    'cursor: ~/.cursor/mcp.json',
+  );
+}
 
 // 3b. Claude: merge-by-key into live ~/.claude.json (never delete unmanaged keys, except
 // names listed in retiredMcpServers — that is how a removal reaches every machine)
@@ -346,8 +407,10 @@ writeIfChanged(
   const live = existsSync(target) ? readJson(target) : {};
   const merged = { ...(live.mcpServers ?? {}) };
   let dirty = false;
-  for (const name of retired) {
-    if (name in merged) { delete merged[name]; dirty = true; }
+  if (!MEMORY_ONLY) {
+    for (const name of retired) {
+      if (name in merged) { delete merged[name]; dirty = true; }
+    }
   }
   for (const [name, def] of Object.entries(wanted('claude'))) {
     if (JSON.stringify(merged[name]) !== JSON.stringify(def)) { merged[name] = def; dirty = true; }
@@ -382,10 +445,19 @@ writeIfChanged(
       return `[mcp_servers.${name}]\n${lines.join('\n')}\n`;
     };
     const upsertSection = (content, name, section) => {
-      // Replace from the section header to the next top-level header (or EOF).
-      const re = new RegExp(`(^|\\n)\\[mcp_servers\\.${name.replaceAll('.', '\\.')}\\][^\\n]*\\n(?:(?!\\[)[^\\n]*\\n?)*`);
-      if (re.test(content)) return content.replace(re, (m, lead) => `${lead}${section}`);
-      return content === '' ? section : `${content.replace(/\n*$/, '\n\n')}${section}`;
+      const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      // Codex rewrites config.toml with indented tables, so headers may carry leading whitespace.
+      const header = new RegExp(`^[ \\t]*\\[mcp_servers\\.${escaped}\\][^\\r\\n]*(?:\\r?\\n|$)`, 'm').exec(content);
+      if (!header) {
+        if (content === '') return section;
+        return `${content.replace(/\n*$/, '\n\n')}${section}`;
+      }
+      const bodyStart = header.index + header[0].length;
+      // The section ends at the next header that is not one of its own subtables (e.g. .env).
+      const nextHeader = content.slice(bodyStart).search(new RegExp(`^[ \\t]*\\[(?!mcp_servers\\.${escaped}\\.)`, 'm'));
+      const end = nextHeader < 0 ? content.length : bodyStart + nextHeader;
+      // Keep one blank line before a following table so the merge stays a fixed point.
+      return `${content.slice(0, header.index)}${section}${end < content.length ? '\n' : ''}${content.slice(end)}`;
     };
     const target = join(HOME, '.codex', 'config.toml');
     const live = existsSync(target) ? read(target) : '';
@@ -402,14 +474,90 @@ writeIfChanged(
   }
 }
 
+// Optional execution defaults, off unless global/execution-permissions.json exists (the template
+// ships none). Each client section is optional: claude.defaultMode, opencode.permission, and root
+// keys for codex / kimi config.toml. Full render only; --memory-only never changes permissions.
+// These are separate from MCP, model selection and approval hooks.
+const permissionsFile = join(ROOT, 'global', 'execution-permissions.json');
+if (!MEMORY_ONLY && existsSync(permissionsFile)) {
+  const permissions = readJson(permissionsFile);
+  if (permissions.claude?.defaultMode) {
+    mergeJsonFile(join(HOME, '.claude', 'settings.json'), 'claude: standing execution permissions', (s) => {
+      s.permissions ??= {};
+      s.permissions.defaultMode = permissions.claude.defaultMode;
+    });
+  }
+  if (permissions.opencode?.permission && existsSync(join(HOME, '.config', 'opencode'))) {
+    mergeJsonFile(join(HOME, '.config', 'opencode', 'opencode.json'), 'opencode: standing execution permissions', (s) => {
+      // Keep explicit tool/account restrictions; set only the broad default.
+      s.permission = typeof s.permission === 'object' && s.permission !== null
+        ? { '*': permissions.opencode.permission, ...s.permission }
+        : permissions.opencode.permission;
+      if (typeof s.permission === 'object') s.permission['*'] = permissions.opencode.permission;
+    });
+    // JSONC loads later than JSON. Edit only its root permission default, keeping comments
+    // and per-tool restrictions byte-for-byte; a nested agent permission is not global.
+    const jsonc = join(HOME, '.config', 'opencode', 'opencode.jsonc');
+    if (existsSync(jsonc)) {
+      const live = read(jsonc);
+      const tokens = [...live.matchAll(/"(?:\\.|[^"\\])*"|\/\/[^\r\n]*|\/\*[\s\S]*?\*\/|[{}\[\]:,]/g)]
+        .filter((m) => !m[0].startsWith('/'));
+      let depth = 0, property = -1;
+      for (let i = 0; i < tokens.length; i++) {
+        if (depth === 1 && tokens[i][0].startsWith('"') && JSON.parse(tokens[i][0]) === 'permission' && tokens[i + 1]?.[0] === ':') property = i;
+        if ('{['.includes(tokens[i][0])) depth++;
+        if ('}]'.includes(tokens[i][0])) depth--;
+      }
+      if (property >= 0) {
+        const value = tokens[property + 2];
+        let next;
+        if (value[0].startsWith('"')) {
+          next = live.slice(0, value.index) + JSON.stringify(permissions.opencode.permission) + live.slice(value.index + value[0].length);
+        } else if (value[0] === '{') {
+          let nested = 1, wildcard;
+          for (let i = property + 3; i < tokens.length && nested > 0; i++) {
+            if (nested === 1 && tokens[i][0].startsWith('"') && JSON.parse(tokens[i][0]) === '*' && tokens[i + 1]?.[0] === ':') wildcard = tokens[i + 2];
+            if ('{['.includes(tokens[i][0])) nested++;
+            if ('}]'.includes(tokens[i][0])) nested--;
+          }
+          if (wildcard && !wildcard[0].startsWith('"')) fail('opencode: JSONC wildcard permission must be a string');
+          const pos = wildcard ? wildcard.index : value.index + 1;
+          const replacement = wildcard ? JSON.stringify(permissions.opencode.permission)
+            : `"*": ${JSON.stringify(permissions.opencode.permission)}${tokens[property + 3]?.[0] === '}' ? '' : ','}`;
+          next = live.slice(0, pos) + replacement + live.slice(pos + (wildcard?.[0].length ?? 0));
+        } else fail('opencode: unsupported JSONC permission value');
+        writeIfChanged(jsonc, next, 'opencode: JSONC standing execution permissions');
+      }
+    }
+  }
+  // Both clients keep native execution defaults at the TOML root. Preserve nested profiles,
+  // provider credentials, model choices and explicit permission rules byte-for-byte.
+  for (const [client, directory] of [['codex', '.codex'], ['kimi', '.kimi-code']]) {
+    if (!permissions[client] || (client === 'kimi' && !existsSync(join(HOME, directory)))) continue;
+    const target = join(HOME, directory, 'config.toml');
+    const live = existsSync(target) ? read(target) : '';
+    const firstTable = live.search(/^[ \t]*\[/m);
+    let root = firstTable < 0 ? live : live.slice(0, firstTable);
+    for (const [key, value] of Object.entries(permissions[client])) {
+      const line = `${key} = ${JSON.stringify(value)}`;
+      const existing = new RegExp(`^[ \\t]*(?:${key}|"${key}"|'${key}')[ \\t]*=[^\\r\\n]*`, 'm');
+      root = existing.test(root) ? root.replace(existing, line) : `${line}\n${root}`;
+    }
+    writeIfChanged(target, root + (firstTable < 0 ? '' : live.slice(firstTable)), `${client}: standing execution permissions`);
+  }
+}
+
 // ---- 4. Memory hooks ----------------------------------------------------------------
 const node = STABLE_NODE; // absolute node path — hooks run outside any shell profile
 const recall = join(ROOT, 'hooks', 'recall.mjs');
 const sync = join(ROOT, 'hooks', 'sync.mjs');
+const hindsightPrompt = join(ROOT, 'hooks', 'hindsight-prompt.mjs');
+const retainBatch = join(ROOT, 'hooks', 'hindsight-retain-batch.mjs');
+const codexCmd = (script, flag = '') => codexHookCommand(node, script, flag);
 const cmd = (script, flag = '') => `"${node}" "${script}"${flag ? ` ${flag}` : ''}`;
 // A hook command is "ours" if it runs a script of the same filename — lets a render
 // upgrade a managed command in place (e.g. adding flags) without duplicating it.
-const managesScript = (command, script) => new RegExp(`[\\\\/]${basename(script).replaceAll('.', '\\.')}"`).test(command);
+const managesScript = (command, script) => new RegExp(`[\\\\/]${basename(script).replaceAll('.', '\\.')}["']`).test(hookCommandSource(command));
 
 function mergeJsonFile(target, label, mutate) {
   const live = existsSync(target) ? readJson(target) : {};
@@ -423,16 +571,32 @@ function mergeJsonFile(target, label, mutate) {
   writeFileSync(target, `${JSON.stringify(next, null, 2)}\n`);
 }
 
-// Nested {hooks:[{command}]} ensure (Claude/Codex shape): prune stale managed variants
-// of the same script, then add if absent.
-const ensureNested = (s, event, command, script, mkEntry) => {
+// Nested {hooks:[{command}]} ensure (Claude/Codex shape). Replace the first managed
+// variant in place because Codex hook trust keys include the outer array index. Then
+// prune duplicate managed variants.
+const ensureNested = (s, event, command, script, mkEntry, matches = (value) => managesScript(value, script)) => {
   s.hooks[event] ??= [];
-  for (const entry of s.hooks[event]) {
-    if (entry.hooks) entry.hooks = entry.hooks.filter((h) => h.command === command || !managesScript(h.command, script));
+  const desired = mkEntry(command);
+  let kept = false;
+  for (let i = 0; i < s.hooks[event].length; i += 1) {
+    const entry = s.hooks[event][i];
+    if (!entry.hooks) continue;
+    const managed = entry.hooks.findIndex((hook) => matches(hook.command));
+    if (managed < 0) continue;
+    if (!kept) {
+      kept = true;
+      if (entry.hooks.length === 1 && desired.hooks.length === 1) {
+        s.hooks[event][i] = desired;
+      } else {
+        entry.hooks[managed] = desired.hooks[0];
+      }
+      entry.hooks = entry.hooks.filter((hook, index) => index === managed || !matches(hook.command));
+    } else {
+      entry.hooks = entry.hooks.filter((hook) => !matches(hook.command));
+    }
   }
   s.hooks[event] = s.hooks[event].filter((e) => !e.hooks || e.hooks.length > 0);
-  const all = s.hooks[event].flatMap((e) => e.hooks ?? []);
-  if (!all.some((h) => h.command === command)) s.hooks[event].push(mkEntry(command));
+  if (!kept) s.hooks[event].push(desired);
 };
 
 // 4a. Claude Code (~/.claude/settings.json) — append-if-absent, preserve existing hooks
@@ -441,17 +605,95 @@ mergeJsonFile(join(HOME, '.claude', 'settings.json'), 'claude: settings.json mem
   const entry = (command) => ({ matcher: '', hooks: [{ type: 'command', command }] });
   ensureNested(s, 'SessionStart', cmd(recall), recall, entry);
   ensureNested(s, 'SessionEnd', cmd(sync, '--agent claude'), sync, entry);
+  if (hindsight) {
+    const promptEntry = (command) => ({ matcher: '', hooks: [{ type: 'command', command, timeout: 10 }] });
+    ensureNested(s, 'UserPromptSubmit', cmd(hindsightPrompt, '--agent claude'), hindsightPrompt, promptEntry);
+  }
+  // Retired: guard-context.mjs re-read up to 8MB of transcript on every tool call to warn at
+  // 250k tokens; Claude Code already shows context use and auto-compacts.
+  const guardContext = join(ROOT, 'hooks', 'guard-context.mjs');
+  for (const e of s.hooks.PreToolUse ?? []) if (e.hooks) e.hooks = e.hooks.filter((h) => !managesScript(h.command, guardContext));
+  if (s.hooks.PreToolUse) s.hooks.PreToolUse = s.hooks.PreToolUse.filter((e) => !e.hooks || e.hooks.length > 0);
 });
+
+// 4a1. Secret redaction at the tool-output boundary: secret-prone Bash commands are
+// piped through bin/redact.mjs, and every tool result is scrubbed before the transcript
+// stores it. Rendered on every machine, including --memory-only runs. SAMEBRAIN_REDACT=0 turns
+// the hook into a no-op.
+const redactHook = join(ROOT, 'hooks', 'redact-hook.mjs');
+mergeJsonFile(join(HOME, '.claude', 'settings.json'), 'claude: settings.json secret redaction hooks', (s) => {
+  s.hooks ??= {};
+  const entry = (matcher) => (command) => ({ matcher, hooks: [{ type: 'command', command, timeout: 10 }] });
+  ensureNested(s, 'PreToolUse', cmd(redactHook), redactHook, entry('Bash'));
+  ensureNested(s, 'PostToolUse', cmd(redactHook), redactHook, entry('Bash|PowerShell|WebFetch|mcp__.*'));
+});
+
+// 4a2. Optional effort and token defaults, off unless global/token-efficiency.json exists (the
+// template ships none). claude.effortLevel and codex.reasoningEffort are applied on every render;
+// the other keys are set only when absent, so a per-machine choice sticks:
+//   claude: autoCompactWindow, disabledSyncedPlugins ["name", ...], skillOverrides { skill: "off" | "name-only" }
+//   codex:  rootDefaults { key: value } (config.toml root), tables { "profiles.x": { key: value } }
+const tokenFile = join(ROOT, 'global', 'token-efficiency.json');
+const tokenSettings = existsSync(tokenFile) ? readJson(tokenFile) : null;
+if (tokenSettings?.claude) {
+  const c = tokenSettings.claude;
+  mergeJsonFile(join(HOME, '.claude', 'settings.json'), 'claude: settings.json effort + token efficiency', (s) => {
+    if (c.effortLevel) s.effortLevel = c.effortLevel;
+    if (c.autoCompactWindow !== undefined) s.autoCompactWindow ??= c.autoCompactWindow;
+    if (c.disabledSyncedPlugins?.length) {
+      s.enabledPlugins ??= {};
+      for (const plugin of c.disabledSyncedPlugins) s.enabledPlugins[`${plugin}@synced`] ??= false;
+    }
+    if (c.skillOverrides && Object.keys(c.skillOverrides).length) {
+      s.skillOverrides ??= {};
+      for (const [skill, mode] of Object.entries(c.skillOverrides)) s.skillOverrides[skill] ??= mode;
+    }
+  });
+}
+if (tokenSettings?.codex && !MEMORY_ONLY && existsSync(join(HOME, '.codex', 'config.toml'))) {
+  // Root-table keys: reasoningEffort is replaced in place, rootDefaults are added only when
+  // absent. New keys go just before the first [table]; extra tables are appended once.
+  const target = join(HOME, '.codex', 'config.toml');
+  let live = read(target);
+  const cx = tokenSettings.codex;
+  const rootKeys = [
+    ...(cx.reasoningEffort ? [['model_reasoning_effort', cx.reasoningEffort, true]] : []),
+    ...Object.entries(cx.rootDefaults ?? {}).map(([k, v]) => [k, v, false]),
+  ];
+  for (const [key, value, force] of rootKeys) {
+    const firstTable = live.search(/^\s*\[/m);
+    const root = firstTable < 0 ? live : live.slice(0, firstTable);
+    const rest = firstTable < 0 ? '' : live.slice(firstTable);
+    const re = new RegExp(`^${key}\\s*=.*$`, 'm');
+    const line = `${key} = ${JSON.stringify(value)}`;
+    if (re.test(root)) {
+      if (force) live = root.replace(re, line) + rest;
+      continue;
+    }
+    const head = root.trim() ? `${root.replace(/\n*$/, '\n')}` : '';
+    live = `${head}${line}\n${rest ? `\n${rest.replace(/^\n+/, '')}` : ''}`;
+  }
+  for (const [table, body] of Object.entries(cx.tables ?? {})) {
+    if (live.split('\n').some((l) => l.trim() === `[${table}]`)) continue;
+    const lines = Object.entries(body).map(([k, v]) => `${k} = ${JSON.stringify(v)}`).join('\n');
+    live = `${live.replace(/\n*$/, '\n')}\n[${table}]\n${lines}\n`;
+  }
+  writeIfChanged(target, live, 'codex: config.toml effort + token efficiency');
+}
 
 // 4b. Codex (~/.codex/hooks.json)
 mergeJsonFile(join(HOME, '.codex', 'hooks.json'), 'codex: hooks.json memory hooks', (s) => {
   s.hooks ??= {};
   const entry = (command) => ({ hooks: [{ type: 'command', command }] });
-  ensureNested(s, 'SessionStart', cmd(recall), recall, entry);
-  ensureNested(s, 'Stop', cmd(sync, '--agent codex'), sync, entry);
+  ensureNested(s, 'SessionStart', codexCmd(recall), recall, entry);
+  ensureNested(s, 'Stop', codexCmd(sync, '--agent codex'), sync, entry);
+  if (hindsight) {
+    const promptEntry = (command) => ({ hooks: [{ type: 'command', command, timeout: process.platform === 'win32' ? 10 : 5 }] });
+    ensureNested(s, 'UserPromptSubmit', codexCmd(hindsightPrompt, '--agent codex'), hindsightPrompt, promptEntry);
+  }
 });
 
-// 4c. Cursor (~/.cursor/hooks.json) — flat {command} entries
+// 4d. Cursor (~/.cursor/hooks.json) — flat {command} entries
 mergeJsonFile(join(HOME, '.cursor', 'hooks.json'), 'cursor: hooks.json memory hooks', (s) => {
   s.version ??= 1;
   s.hooks ??= {};
@@ -464,6 +706,8 @@ mergeJsonFile(join(HOME, '.cursor', 'hooks.json'), 'cursor: hooks.json memory ho
   ensure('stop', cmd(sync, '--agent cursor'), sync);
 });
 
+// Skills, plugins and agents are full-render only; --memory-only leaves them alone.
+if (!MEMORY_ONLY) {
 // ---- 5. Skills (all agents) + liveness hooks ------------------------------------------
 // Optional `targets:` line in a skill's frontmatter limits which agents receive it
 // (e.g. `targets: claude`). Default: claude, cursor, codex. Kimi is opt-in.
@@ -526,6 +770,7 @@ if (existsSync(join(HOME, '.config', 'opencode'))) {
 // opencode plugins: canonical sources in plugins/<name>.{ts,js} render to
 // ~/.config/opencode/plugins/<name> (auto-discovered by opencode). Detection-gated.
 // `{{REPO}}` resolves to this machine's repo path so a plugin isn't tied to one
+// (`{{REPO_URL}}` is the same as a file:// URL, required for ESM imports on Windows)
 // directory name — samebrain-memory owns the memory lifecycle; guardrails, notify,
 // and telemetry add enforcement, completion alerts, and cost records.
 if (existsSync(join(HOME, '.config', 'opencode'))) {
@@ -533,9 +778,14 @@ if (existsSync(join(HOME, '.config', 'opencode'))) {
   if (existsSync(pluginsDir)) {
     for (const file of readdirSync(pluginsDir)) {
       if (!/\.(ts|js)$/.test(file)) continue;
-      const body = read(join(pluginsDir, file)).replaceAll('{{REPO}}', ROOT.replaceAll('\\', '/')).replaceAll('{{NODE}}', STABLE_NODE.replaceAll('\\', '/'));
+      const target = join(HOME, '.config', 'opencode', 'plugins', file);
+      // Import specifiers take {{REPO_URL}}: Node rejects bare Windows drive paths; Bun accepts both.
+      const body = read(join(pluginsDir, file))
+        .replaceAll('{{REPO_URL}}', pathToFileURL(ROOT).href)
+        .replaceAll('{{REPO}}', ROOT.replaceAll('\\', '/'))
+        .replaceAll('{{NODE}}', STABLE_NODE.replaceAll('\\', '/'));
       writeIfChanged(
-        join(HOME, '.config', 'opencode', 'plugins', file),
+        target,
         `// rendered by samebrain (bin/render.mjs) — edit plugins/${file} in the repo, not here\n${body}`,
         `opencode: ~/.config/opencode/plugins/${file}`,
       );
@@ -564,10 +814,12 @@ if (existsSync(join(HOME, '.config', 'opencode'))) {
     }
   }
 }
+}
 // ---- 5b. Hindsight long-term memory (opt-in, see global/hindsight.json) --------------------
 // Every agent runs the pinned @vectorize-io/hindsight-coding-agents runtime (staged by
-// bin/hindsight-activate.mjs): Claude Code and Cursor get its session-start, prompt and stop hooks
-// plus its MCP server, Codex its capture hook, opencode its persistent plugin. All of them write the
+// bin/hindsight-activate.mjs): Claude Code and Cursor get its session-start, prompt and stop hooks,
+// Claude Code/Codex/Cursor get its MCP server, Codex gets its capture hook, and opencode its
+// persistent plugin. All of them write the
 // same `conversation:<session>` documents into one bank per repository. Hook wiring waits until the
 // runtime is staged at the pinned version — a hook pointing at a missing file would error every
 // session. Config files carry the API key, so they are written owner-only.
@@ -579,7 +831,9 @@ if (hindsight) {
     const live = existsSync(target) ? readJson(target) : {};
     const next = mutate(JSON.parse(JSON.stringify(live)));
     const content = `${JSON.stringify(next, null, 2)}\n`;
-    const sameMode = existsSync(target) && (statSync(target).mode & 0o777) === 0o600;
+    // chmod does not expose a POSIX 0600 mode through stat on Windows; ACL protection is handled
+    // by activation. Treat matching bytes as stable there so every render is not false drift.
+    const sameMode = existsSync(target) && (process.platform === 'win32' || (statSync(target).mode & 0o777) === 0o600);
     if (existsSync(target) && read(target) === content && sameMode) return;
     changes.push(label);
     if (CHECK) return;
@@ -599,6 +853,7 @@ if (hindsight) {
     banks: {
       ...(live.banks ?? {}),
       ...Object.fromEntries(nonRepo.map((d) => [basename(d), { bank: hs.globalBank }])),
+      ...Object.fromEntries(Object.entries(hs.bankAliases ?? {}).map(([from, bank]) => [from, { bank }])),
     },
   }), `hindsight: ${ca.configFile}`);
 
@@ -624,16 +879,27 @@ if (hindsight) {
       // Synchronous like upstream: headless `claude -p` exits before an async hook finishes, which
       // silently dropped headless-run capture. The retain itself is queued server-side (~0.3s).
       const entry = (command) => ({ matcher: '', ...timed(60)(command) });
-      ensureNested(s, 'Stop', hookCmd('claude-stop-hook.js'), join(runtime, 'dist', 'claude-stop-hook.js'), entry);
-      // Session start seeds a cold bank (git history, knowledge pages) in the background and
-      // injects the knowledge-page roster; each prompt gets the once-per-session reflect plus
-      // relevant page sections.
+      // Batched: the wrapper forwards a Stop only after enough new turns or time, and
+      // SessionEnd flushes the rest, so long sessions retain in a few large appends.
+      const claudeStop = join(runtime, 'dist', 'claude-stop-hook.js');
+      ensureNested(s, 'Stop', cmd(retainBatch, `--upstream "${claudeStop}"`), claudeStop, entry);
+      ensureNested(s, 'SessionEnd', cmd(retainBatch, `--upstream "${claudeStop}" --flush`), claudeStop, entry);
+      ensureNested(s, 'SessionStart', cmd(retainBatch, '--sweep'), retainBatch, (command) => ({ matcher: '', ...timed(10)(command) }));
+      // Session start injects the knowledge-page roster. Automatic seeding and reflection stay
+      // disabled; hooks/hindsight-prompt.mjs supplies bounded raw relevance recall instead.
       ensureNested(s, 'SessionStart', hookCmd('claude-sessionstart-hook.js'), join(runtime, 'dist', 'claude-sessionstart-hook.js'), entry);
-      ensureNested(s, 'UserPromptSubmit', hookCmd('claude-hook.js'), join(runtime, 'dist', 'claude-hook.js'), (command) => ({ matcher: '', ...timed(30)(command) }));
+      // claude-hook.js is not installed: with reflection and seeding off it emits nothing yet costs
+      // ~0.45s per prompt. Prune any copy left by an earlier render.
+      const promptHook = join(runtime, 'dist', 'claude-hook.js');
+      for (const e of s.hooks.UserPromptSubmit ?? []) if (e.hooks) e.hooks = e.hooks.filter((h) => !managesScript(h.command, promptHook));
+      if (s.hooks.UserPromptSubmit) s.hooks.UserPromptSubmit = s.hooks.UserPromptSubmit.filter((e) => !e.hooks || e.hooks.length > 0);
     });
     mergeJsonFile(join(HOME, '.codex', 'hooks.json'), 'codex: hooks.json hindsight capture hook', (s) => {
       s.hooks ??= {};
-      ensureNested(s, 'Stop', hookCmd('codex-stop-hook.js'), join(runtime, 'dist', 'codex-stop-hook.js'), timed(60));
+      const codexStop = join(runtime, 'dist', 'codex-stop-hook.js');
+      // Windows wraps the flags in PowerShell, where only a single-quoted value is taken literally.
+      const upstreamFlag = process.platform === 'win32' ? `'--upstream=${codexStop.replaceAll("'", "''")}'` : `--upstream "${codexStop}"`;
+      ensureNested(s, 'Stop', codexCmd(retainBatch, upstreamFlag), codexStop, timed(60));
     });
     mergeJsonFile(join(HOME, '.cursor', 'hooks.json'), 'cursor: hooks.json hindsight capture hook', (s) => {
       s.version ??= 1;
@@ -653,28 +919,7 @@ if (hindsight) {
     });
     // One writer: Codex's native memories duplicate what the capture hook retains from Codex
     // sessions, so they are switched off in [features] (section-level edit, rest of the file kept).
-    if (hs.codex?.nativeMemories === false && existsSync(join(HOME, '.codex', 'config.toml'))) {
-      const target = join(HOME, '.codex', 'config.toml');
-      const live = read(target);
-      const header = live.match(/^\[features\][^\n]*$/m);
-      let next;
-      if (!header) {
-        next = `${live.replace(/\n*$/, '\n\n')}[features]\nmemories = false\n`;
-      } else {
-        const start = header.index + header[0].length;
-        const rest = live.slice(start);
-        const end = start + (rest.search(/^\[/m) === -1 ? rest.length : rest.search(/^\[/m));
-        const section = live.slice(start, end);
-        const flipped = /^memories\s*=.*$/m.test(section)
-          ? section.replace(/^memories\s*=.*$/m, 'memories = false')
-          : `\nmemories = false${section}`;
-        next = `${live.slice(0, start)}${flipped}${live.slice(end)}`;
-      }
-      if (next !== live) {
-        changes.push('codex: ~/.codex/config.toml features.memories = false (Hindsight is the writer)');
-        if (!CHECK) { backupOnce(target); writeFileSync(target, next); }
-      }
-    }
+    if (hs.codex?.nativeMemories === false) setCodexFeature('memories', 'Hindsight is the writer');
     // opencode loads the runtime as a persistent plugin (package.json main); it retains every turn.
     if (existsSync(join(HOME, '.config', 'opencode'))) {
       if (existsSync(join(HOME, '.config', 'opencode', 'opencode.jsonc'))) {
@@ -689,8 +934,41 @@ if (hindsight) {
   }
 }
 
+// Windows: Codex's shared app-server daemon runs without a console, so every git/shell command it
+// launches opens a visible console window (bursts of flashing terminals). With auto-start off, each
+// Codex session hosts its own app server inside its terminal and those commands stay hidden.
+if ((process.env.SAMEBRAIN_RENDER_PLATFORM ?? process.platform) === 'win32') {
+  setCodexFeature('daemon_auto_start', 'Windows: daemon children flash console windows');
+}
+
+// Sets one `[features]` key in ~/.codex/config.toml to false, editing only that section and keeping
+// Codex's own (indented) formatting.
+function setCodexFeature(key, why) {
+  const target = join(HOME, '.codex', 'config.toml');
+  if (!existsSync(target)) return;
+  const live = read(target);
+  const header = live.match(/^\[features\][^\n]*$/m);
+  const keyLine = new RegExp(`^([ \\t]*)${key}\\s*=.*$`, 'm');
+  let next;
+  if (!header) {
+    next = `${live.replace(/\n*$/, '\n\n')}[features]\n${key} = false\n`;
+  } else {
+    const start = header.index + header[0].length;
+    const rest = live.slice(start);
+    const end = start + (rest.search(/^\[/m) === -1 ? rest.length : rest.search(/^\[/m));
+    const section = live.slice(start, end);
+    const flipped = keyLine.test(section) ? section.replace(keyLine, `$1${key} = false`) : `\n${key} = false${section}`;
+    next = `${live.slice(0, start)}${flipped}${live.slice(end)}`;
+  }
+  if (next !== live) {
+    changes.push(`codex: ~/.codex/config.toml features.${key} = false (${why})`);
+    if (!CHECK) { backupOnce(target); writeFileSync(target, next); }
+  }
+}
+
 // OpenClaw loads extra skill roots at the lowest precedence, so workspace and managed
 // OpenClaw skills can still override samebrain's rendered Claude-compatible baseline.
+if (!MEMORY_ONLY) {
 if (existsSync(join(HOME, '.openclaw'))) {
   const claudeSkills = join(HOME, '.claude', 'skills');
   mergeJsonFile(join(HOME, '.openclaw', 'openclaw.json'), 'openclaw: openclaw.json skills.load.extraDirs', (s) => {
@@ -712,8 +990,8 @@ mergeJsonFile(join(HOME, '.claude', 'settings.json'), 'claude: settings.json sma
 mergeJsonFile(join(HOME, '.codex', 'hooks.json'), 'codex: hooks.json smartloop hooks', (s) => {
   s.hooks ??= {};
   const entry = (command) => ({ hooks: [{ type: 'command', command }] });
-  ensureNested(s, 'SessionStart', cmd(sweep), sweep, entry);
-  ensureNested(s, 'Stop', cmd(slStop), slStop, entry);
+  ensureNested(s, 'SessionStart', codexCmd(sweep), sweep, entry);
+  ensureNested(s, 'Stop', codexCmd(slStop), slStop, entry);
 });
 mergeJsonFile(join(HOME, '.cursor', 'hooks.json'), 'cursor: hooks.json smartloop hooks', (s) => {
   s.version ??= 1;
@@ -826,22 +1104,29 @@ mergeJsonFile(join(HOME, '.claude', 'settings.json'), 'claude: settings.json aut
     }
   }
 }
+}
 
 // ---- report -------------------------------------------------------------------------
 if (changes.length === 0) {
   console.log('render: everything in sync');
 } else {
-  console.log(`render${CHECK ? ' --check (no writes)' : ''}:`);
+  console.log(`render${MEMORY_ONLY ? ' --memory-only' : ''}${CHECK ? ' --check (no writes)' : ''}:`);
   for (const c of changes) console.log(`  ${CHECK ? 'drift' : 'wrote'}: ${c}`);
 }
 
 // Record which engine revision this render applied — the session-start recall hook
 // re-renders when HEAD moves past this marker (rebase pulls never fire post-merge).
 if (!CHECK) {
+  if (MEMORY_ONLY) {
+    mkdirSync(dirname(RENDER_MODE_FILE), { recursive: true });
+    writeFileSync(RENDER_MODE_FILE, 'memory-only\n');
+  } else if (existsSync(RENDER_MODE_FILE)) {
+    rmSync(RENDER_MODE_FILE);
+  }
   try {
     const head = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: ROOT, timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'] })
       .toString().trim();
     mkdirSync(join(ROOT, 'backups'), { recursive: true });
-    writeFileSync(join(ROOT, 'backups', '.last-render-head'), `${head}\n`);
+    writeFileSync(join(ROOT, 'backups', MEMORY_ONLY ? '.last-memory-render-head' : '.last-render-head'), `${head}\n`);
   } catch { /* not a git clone — marker simply doesn't exist */ }
 }

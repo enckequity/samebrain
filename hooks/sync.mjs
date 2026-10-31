@@ -8,6 +8,7 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync, writeFil
 import { homedir, hostname } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {syncGit,syncWarning} from './git-sync.mjs';
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const agentIdx = process.argv.indexOf('--agent');
@@ -54,33 +55,19 @@ try {
       mkdirSync(dirname(stamp), { recursive: true });
       writeFileSync(stamp, `${JSON.stringify({ at: new Date().toISOString() })}\n`);
       spawn(process.execPath, [join(root, 'bin', 'hindsight-backfill.mjs'), '--sources', 'memory,claude-memory'], {
-        detached: true, stdio: 'ignore',
+        detached: true, stdio: 'ignore', windowsHide: true,
+      }).unref();
+      spawn(process.execPath, [join(root, 'bin', 'memory-retain.mjs'), '--flush'], {
+        detached: true, stdio: 'ignore', windowsHide: true,
       }).unref();
     }
   }
 } catch { /* memory sync is best-effort */ }
 
-const git = (args, timeout = 10000) =>
-  execFileSync('git', args, { cwd: root, timeout, stdio: ['ignore', 'pipe', 'ignore'] })
-    .toString().trim();
-
 // Commit leases alongside memory/telemetry so a claim taken on this machine is visible
 // to every other machine (the lease protocol says commit the file — this does it for you).
-// Only stage paths that exist: `git add` errors on a missing pathspec and would abort the
-// whole sync on an instance that, say, keeps no local telemetry yet.
-const paths = ['memory', 'telemetry', 'coordination/leases'].filter((p) => existsSync(join(root, p)));
+// The helper distinguishes tracked deletions from paths that never existed.
+const paths = ['memory', 'telemetry', 'coordination/leases'];
 
-try {
-  if (paths.length && git(['status', '--porcelain', '--', ...paths])) {
-    git(['add', '--', ...paths]);
-    git(['commit', '-m', 'mem: session update', '--quiet']);
-  }
-  try {
-    // Push any unpushed commits (this session's or a previously offline one)
-    git(['push', '--quiet'], 15000);
-  } catch {
-    // Rejected — another machine pushed first. Reconcile once over a rebase, then retry.
-    try { git(['pull', '--rebase', '--autostash', '--quiet'], 15000); git(['push', '--quiet'], 15000); }
-    catch { /* still offline — next session's recall pull will rebase */ }
-  }
-} catch { /* offline — next session's recall pull will rebase */ }
+const warning=syncWarning(syncGit(root,{timeout:15000,commitPaths:paths,push:true}));
+if(warning)process.stderr.write(warning+'\n');

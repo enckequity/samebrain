@@ -5,7 +5,6 @@
 //   node bin/hindsight-banks.mjs --check               report drift, change nothing
 //   node bin/hindsight-banks.mjs --refresh <bank>/<page name>   rebuild one page now and print it
 //   node bin/hindsight-banks.mjs --maintain            clear + rebuild delta pages (drift), when due
-import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -31,19 +30,12 @@ const call = async (method, path, body, timeoutMs = 30000) => {
   return r.json;
 };
 
-// Daily refresh at a minute and hour hashed from bank + page, so refreshes never pile up at once.
-function staggeredDailyCron(bank, name) {
-  const h = createHash('sha256').update(`${bank}/${name}`).digest();
-  return `${h[0] % 60} ${h[1] % 24} * * *`;
-}
-
-const triggerFor = (bank, page) => ({
+const triggerFor = (_bank, page) => ({
   mode: page.mode,
   fact_types: ['observation'],
   exclude_mental_models: true,
   include_chunks: false,
   refresh_after_consolidation: false,
-  refresh_cron: staggeredDailyCron(bank, page.name),
 });
 
 async function pageNodes(bank) {
@@ -67,6 +59,7 @@ async function applyBank(bank) {
       continue;
     }
     const drift = have.description !== want.source_query || (have.tags ?? []).length
+      || have.trigger?.refresh_cron !== undefined
       || Object.entries(want.trigger).some(([k, v]) => JSON.stringify(have.trigger?.[k] ?? null) !== JSON.stringify(v));
     if (drift) {
       changes.push(`update page "${page.name}"`);

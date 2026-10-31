@@ -60,13 +60,24 @@ export function repoName(dir) {
   }
 }
 
+// Folder name Claude Code gives a project under ~/.claude/projects: every character outside
+// [A-Za-z0-9] becomes '-', so /Users/x is -Users-x and C:\Users\x is C--Users-x.
+export const claudeProjectName = (dir) => dir.replace(/[^A-Za-z0-9]/g, '-');
+
+// Document id for a Claude Code auto-memory file. Only the POSIX home project keeps the original
+// unprefixed ids, so a Windows home (C--Users-x) and a Mac home (-Users-x) never share an id.
+export function claudeMemoryId(home, project, file) {
+  return project === `-${home.slice(1).replaceAll('/', '-')}` ? `claude-memory:${file}` : `claude-memory:${project}/${file}`;
+}
+
 // Bank for a session directory: settings.nonRepoDirs route to the global bank, a repository to its
 // name, anything else to the directory basename (the plugins' non-repository fallback).
 export function bankForCwd(cwd, settings) {
   const dir = real(cwd || process.cwd());
   const nonRepo = (settings.nonRepoDirs ?? []).map((d) => real(expandHome(d)));
   if (nonRepo.includes(dir)) return settings.globalBank;
-  return repoName(dir) ?? (basename(dir) || settings.globalBank);
+  const derived = repoName(dir) ?? (basename(dir) || settings.globalBank);
+  return settings.bankAliases?.[derived] ?? derived;
 }
 
 // Mirrors _REDACTION_PATTERNS in hindsight_api/extensions/memory_defense.py (v0.10.0) so content
@@ -125,12 +136,21 @@ const LOCAL_PATTERNS = [
   ['private_key_block', '-----BEGIN [A-Z ]*PRIVATE KEY( BLOCK)?-----[\\s\\S]*?-----END [A-Z ]*PRIVATE KEY( BLOCK)?-----'],
   ['op_reference', 'op://[^\\s"\'`]+'],
 ];
-const COMPILED = [...LOCAL_PATTERNS, ...REDACTION_PATTERNS]
+// Any other scheme carrying userinfo (redis://, amqp://, https://user:pass@...): runs after the
+// server rules so postgres/mysql/mongodb keep their own labels (a pooler URL printed by
+// `printenv` is the typical leak). The lookbehind anchors the scheme at a token start; without
+// it a long run of letters made the scan quadratic (5 MB of tool output took minutes).
+const CREDENTIAL_URL = ['url_credentials', '(?<![A-Za-z0-9+.-])[A-Za-z][A-Za-z0-9+.-]*://[^\\s:/@"\'`]+:[^\\s/@"\'`]+@[^\\s"\'`]+'];
+const COMPILED = [...LOCAL_PATTERNS, ...REDACTION_PATTERNS, CREDENTIAL_URL]
   .map(([label, src, flags = '']) => [label, new RegExp(src, `g${flags}`)]);
+// Not credentials, so tool-output redaction skips them: every 13-16 digit ID or ms timestamp
+// matches credit_card, and an op:// reference is a location the agent may need to edit.
+const NOT_CREDENTIALS = new Set(['credit_card', 'ssn_us', 'op_reference']);
+const CREDENTIALS = COMPILED.filter(([label]) => !NOT_CREDENTIALS.has(label));
 
-export function scrub(text) {
+export function scrub(text, { credentialsOnly = false } = {}) {
   let out = text;
-  for (const [label, re] of COMPILED) out = out.replace(re, `[REDACTED:${label}]`);
+  for (const [label, re] of credentialsOnly ? CREDENTIALS : COMPILED) out = out.replace(re, `[REDACTED:${label}]`);
   return out;
 }
 

@@ -218,9 +218,9 @@ const searchTool = tool({
   },
   async execute(args, ctx) {
     const { code, out } = await runStatus(NODE, [SEARCH, args.query, "--cwd", ctx.directory], { timeoutMs: 15000 })
-    if (code === 0 && out.trim()) return `Hindsight memory:\n\n${out.trim()}`
+    if (code === 0 && out.trim()) return `Shared memory:\n\n${out.trim()}`
     const local = searchTopics(args.query, args.limit)
-    return code === 1 ? `Hindsight had no match; local topics:\n\n${local}` : local
+    return code === 1 ? `No memory-search match; local topics:\n\n${local}` : local
   },
 })
 

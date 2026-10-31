@@ -50,6 +50,8 @@ Edit these files, then run `node bin/render.mjs` to apply:
 | `global/agents/<harness>/*.md` | Agent definitions rendered to that harness's agent dir (opencode → `~/.config/opencode/agent/`) |
 | `plugins/*.{ts,js}` | opencode plugins (memory lifecycle, auto-continue, guardrails, notifications, cost telemetry) |
 | `global/hindsight.json` | Optional Hindsight long-term memory wiring (`"enabled": false` by default) |
+| `global/execution-permissions.json` | Optional, not shipped. Standing permission defaults per client: `claude.defaultMode`, `opencode.permission`, and root keys for Codex and Kimi `config.toml` |
+| `global/token-efficiency.json` | Optional, not shipped. Effort and token defaults: `claude.effortLevel`, `autoCompactWindow`, `skillOverrides`, `codex.reasoningEffort` and Codex root keys added only when absent |
 | `memory/MEMORY.md` | Shared memory — your agents maintain this themselves |
 
 Always edit these files — never the rendered copies (those carry a "generated" marker and get overwritten).
@@ -108,14 +110,16 @@ Most of these agents don't expose session hooks, so their rendered instructions 
 - `notify.js` — a throttled macOS notification when a session goes idle, errors, or waits on a permission prompt (`OPENCODE_NOTIFY=0`, `OPENCODE_NOTIFY_MIN_MS`).
 - `telemetry.js` — cumulative per-session token and cost snapshots in `telemetry/<machine>/opencode-costs.jsonl` (`SAMEBRAIN_TELEMETRY=0`).
 
-`node bin/render.mjs --check` reports drift without writing anything. The first render backs up anything it replaces to `backups/` (gitignored).
+`node bin/render.mjs --check` reports drift without writing anything. `--memory-only` updates the memory instructions and session hooks and skips skills, plugins and your own MCP servers. The Hindsight MCP entry, the redaction hooks and any optional token settings still render. The first render backs up anything it replaces to `backups/` (gitignored).
+
+Hook and MCP commands use one stable node path (`SAMEBRAIN_NODE`, then `~/.local/bin/node`, then the PATH node), so rendering under a different node does not rewrite every hook and reset Codex's per-command hook trust.
 
 </details>
 
 <details>
 <summary><strong>Shared memory: why git instead of a memory server</strong></summary>
 
-Every session of every agent starts with the contents of `memory/MEMORY.md` injected into context (after a fast, fail-silent `git pull`). The instructions rendered into every agent tell it to append durable facts — one line in the index, detail in `memory/topics/*.md`. At session end, a hook commits and pushes. Offline? Both hooks fail silently and reconcile on the next pull.
+Every session of every agent starts with the contents of `memory/MEMORY.md` injected into context (after a short sync that commits memory, fetches and merges). Sync never forces or resets. If the checkout has other uncommitted work or a conflict, it stops and tells the agent instead of merging. The instructions rendered into every agent tell it to append durable facts — one line in the index, detail in `memory/topics/*.md`. At session end, a hook commits and pushes. Offline? Both hooks fail silently and reconcile on the next pull.
 
 Why this beats an MCP memory server:
 
@@ -148,13 +152,17 @@ Once enabled, render:
 How memory flows back:
 
 - **Session start.** `hooks/recall.mjs` still injects the markdown index first, then a `<hindsight_memories>` block: the knowledge pages and a recall for this repository's bank plus the global bank. It is cache-first: the last result is injected immediately with its age, and a detached refresher revalidates it for the next session; only a bank with no cache waits for a live read, bounded at 1.5s. One live read per bank runs at a time per machine. A slow or unreachable server never blocks the session and never removes the index.
-- **Writing a fact directly.** `node bin/memory-retain.mjs --title "<title>" [--date YYYY-MM-DD] [--global] "<fact + evidence>"` stores a dated document (repository bank by default). Retaining the same title replaces it, so title a fix `Correction: <topic>`. Exit 3 = not enabled or unreachable. opencode's `memory_retain` tool calls it.
+- **Writing a fact directly.** `node bin/memory-retain.mjs --title "<title>" [--date YYYY-MM-DD] [--global] "<fact + evidence>"` stores a dated document (repository bank by default). Retaining the same title replaces it, so title a fix `Correction: <topic>`. Exit 3 = not enabled. A retain refused for a transient reason (unreachable, 5xx, or a spend-cap 429) is queued in a local spool and resent by `--flush`, which the session-end sync runs. opencode's `memory_retain` tool calls it.
 - **Session end.** `hooks/sync.mjs` queues a detached, ledgered backfill of the curated sources (`memory/` and Claude Code auto-memory), at most every 10 minutes (`SAMEBRAIN_HINDSIGHT_SYNC=0` turns it off). Unchanged files send nothing.
-- **On demand.** `node bin/memory-search.mjs "<question>"` searches the repository bank plus the global bank (exit 1 = no match, 3 = not enabled or unreachable, so fall back to `memory/topics/`). opencode's `memory_search` tool uses it first and falls back to a local search over topics.
+- **Each prompt.** In Claude Code and Codex, `hooks/hindsight-prompt.mjs` adds one bounded raw recall per relevant bank to substantive prompts, sized by `promptRecall` in `global/hindsight.json`. It never reflects or seeds, and it gives up quietly instead of outrunning the hook timeout.
+- **On demand.** `node bin/memory-search.mjs "<question>"` searches the repository bank plus the global bank. When Hindsight is off or unreachable it searches `memory/MEMORY.md` and `memory/topics/` instead (exit 1 = no match). opencode's `memory_search` tool uses it too.
 - **Banks.** A repository maps to its main worktree's directory name (linked worktrees share one bank); the home, Desktop, Documents and Downloads directories map to `globalBank`. `node bin/hindsight-banks.mjs` applies `bankSetup` (knowledge pages and directives) to the banks you list; `--check` reports drift and `--maintain` rebuilds drifting pages every `clearEveryHours`.
+- **Batched capture.** Claude Code and Codex capture goes through `hooks/hindsight-retain-batch.mjs`, which forwards a turn only when the transcript has grown enough or enough time has passed. Session end flushes what is pending, and session start sweeps sessions a crashed host left behind. A failed retain is retried, not lost.
 - **Autonomous opencode sessions** (agent-deck or `AUTO_CONTINUE=1`) are captured once per finished task, on a terminal marker, instead of on every model step.
 
 Importing what you already have: `node bin/hindsight-backfill.mjs --dry-run` estimates the cost of sending the curated memory files (including Claude Code auto-memory from every project, routed to that project's bank) and recent Claude Code / Codex transcripts. Without `--dry-run` it sends them oldest to newest with curated files last, stops before `--max-usd` (default 40), skips unchanged documents, and aborts unless a canary proves the server redacts secrets (re-proven at most every `--canary-every-hours`, default 24). Extraction runs on your Hindsight server's model, so it costs whatever that server's provider charges.
+
+Automatic reflect, seeding and scheduled page refresh are off in the template. Server reflect runs can outlast a hook timeout and still bill. Call `hindsight_reflect` on purpose and refresh pages with `node bin/hindsight-banks.mjs`, or set `bankSetup.autoMaintain` to let session start do it.
 
 Content is scrubbed client-side with the server's secret-redaction patterns (plus private-key blocks and `op://` references) before it leaves the machine. Kimi Code and the other bootstrap-line agents keep index-only memory, and interactive opencode sessions are not captured. `SAMEBRAIN_HINDSIGHT=0` switches the backend off on one machine (render, recall and scripts). Turning it off again does not unwire what activation added: remove the Hindsight hooks, the `hindsight` MCP entry, the opencode plugin entry and `~/.hindsight/coding-agent.json` by hand.
 
@@ -246,7 +254,7 @@ Everything reads the files already in your repo; nothing is hosted, nothing phon
 - `node bin/export.mjs --format deepeval|openai-evals|text [--out file]` — exports the smartloop
   trace corpus as an eval dataset (the same formats OpenSync exports, so tooling interoperates).
   When a run's state file still exists, its Contract goal becomes the sample input.
-- `node bin/status.mjs` — one-screen fleet view: machines seen, sessions this month, last git
+- `node bin/status.mjs` — read-only health view: machines seen, sessions this month, last git
   sync per machine, smartloop run tallies, coordination leases.
 
 Prefer hosted dashboards? `node bin/setup.mjs --opensync` prints install steps for the
@@ -267,6 +275,8 @@ String values in `global/mcp.json` support two reference forms, resolved at rend
 - `op://vault/item/field` — via the [1Password CLI](https://developer.1password.com/docs/cli/)
 
 To remove a server from every machine, delete its entry and list its name in `retiredMcpServers` in `global/mcp.json`: render deletes it from each `~/.claude.json`, which is merge-only, so a plain deletion would linger there (Cursor's file is fully owned, so dropping the entry is enough; Codex's opt-in `config.toml` sections are removed by hand).
+
+Secrets in tool output are scrubbed too. In Claude Code, `hooks/redact-hook.mjs` rewrites secret-prone shell commands (`env`, `printenv`, `op read`, `cat .env` and similar) to pipe through `bin/redact.mjs`, and scrubs Bash, PowerShell, WebFetch and MCP results before they reach the transcript. opencode's `guardrails.js` wraps the same commands and scrubs final tool output. Codex is not wired; pipe output through `node bin/redact.mjs` yourself there. `SAMEBRAIN_REDACT=0` turns redaction off in both.
 
 Rendered agent configs get literal values (agents can't expand references); the repo never holds a raw secret — even private forks shouldn't. Unresolvable references fail the render loudly, naming the variable. `secrets.env` exists for machines without a secret-manager CLI: rendered configs already hold resolved values locally, so a local env file adds no new exposure class — copy it once per machine and keep the canonical copy in your secret manager.
 
@@ -326,9 +336,19 @@ git remote add upstream https://github.com/enckequity/samebrain.git   # once
 git pull upstream main                                                # whenever
 ```
 
-You edit `global/` and `memory/`; the template mostly evolves `bin/`, `hooks/`, `plugins/`, and docs — so pulls merge cleanly (if you enabled Hindsight, expect the occasional merge in `global/hindsight.json`). Setup already enabled auto-render after every pull (`git config core.hooksPath .githooks`), and the session-start recall hook re-renders whenever the engine revision changed since the last render (rebase pulls — like recall's own — never fire post-merge), so config changes land on every machine at the next session start, no manual step.
+You edit `global/` and `memory/`; the template mostly evolves `bin/`, `hooks/`, `plugins/`, and docs — so pulls merge cleanly (if you enabled Hindsight, expect the occasional merge in `global/hindsight.json`). Setup already enabled auto-render after every pull (`git config core.hooksPath .githooks`), and the session-start recall hook re-renders whenever the engine revision changed since the last render (session sync merges run with repo hooks off, so the post-merge render only fires on your own pulls), so config changes land on every machine at the next session start, no manual step.
 
-Tests live in `test/run.mjs` (no framework, no deps) and run on Linux/macOS/Windows in CI — `node test/run.mjs` locally before a PR.
+Tests live in `test/run.mjs` (no framework, no deps). It also runs the `node:test` files in `test/` and `hooks/`, and they all run on Linux, macOS and Windows. Tests that need a POSIX shell skip on Windows and say why. Run `node test/run.mjs` locally before a PR.
+
+</details>
+
+<details>
+<summary><strong>Windows notes</strong></summary>
+
+- Session git sync (`hooks/git-sync.mjs`) shares one lock across hooks, handles tracked deletions, and names the failing step when a pull or push fails. Local work is kept.
+- Codex on Windows: render turns off `daemon_auto_start`, because the shared app-server daemon has no console and every command it launches flashes a window. Hook commands are quoted for whichever shell Codex picks, PowerShell or CMD (`bin/codex-hook-command.mjs`).
+- Codex plugin hooks that call `bash` get a `command_windows` launcher. Session start reapplies it after a plugin cache update; `node bin/repair-codex-plugin-hooks.mjs` repairs it on demand. See `docs/codex-windows-plugin-hooks.md`.
+- `SAMEBRAIN_RENDER_PLATFORM=win32` (or `linux`, `darwin`) renders as if on that platform, which is how the tests cover both paths on one machine.
 
 </details>
 

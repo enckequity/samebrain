@@ -1,5 +1,5 @@
 {
-  "_comment": "Optional Hindsight long-term memory backend (https://github.com/vectorize-io/hindsight). OFF by default: nothing here runs until enabled is true AND apiUrlEnv + apiKeyEnv resolve from the environment or the gitignored secrets.env. Secrets never go in this file. When enabled, every agent runs the pinned @vectorize-io/hindsight-coding-agents runtime (staged by bin/hindsight-activate.mjs) for capture, session start adds a bounded recall next to the markdown index, and the markdown index stays the floor whenever the server is unreachable. manageBankConfig stays off so the server owns bank configuration. The runtime's per-step opencode capture stays off (it retains every model step); autonomous opencode sessions are captured once per finished task by plugins/samebrain-memory.ts via hooks/opencode-capture.mjs. The codebase survey stays off: it bills headless agent runs.",
+  "_comment": "Optional Hindsight long-term memory backend (https://github.com/vectorize-io/hindsight). OFF by default: nothing here runs until enabled is true AND apiUrlEnv + apiKeyEnv resolve from the environment or the gitignored secrets.env. Secrets never go in this file. When enabled, every agent runs the pinned @vectorize-io/hindsight-coding-agents runtime (staged by bin/hindsight-activate.mjs) for capture, session start adds a bounded recall next to the markdown index, and the markdown index stays the floor whenever the server is unreachable. manageBankConfig stays off so the server owns bank configuration. The runtime's per-step opencode capture stays off (it retains every model step); autonomous opencode sessions are captured once per finished task by plugins/samebrain-memory.ts via hooks/opencode-capture.mjs. The codebase survey stays off: it bills headless agent runs. Automatic once-per-session reflect, seeding and scheduled page refresh are off too: server reflect runs can outlast the hook timeout while still billing, and a failing scheduled refresh can retry without limit. Call hindsight_reflect deliberately and refresh pages with bin/hindsight-banks.mjs.",
   "enabled": false,
   "apiUrlEnv": "HINDSIGHT_API_URL",
   "apiKeyEnv": "HINDSIGHT_API_KEY",
@@ -10,6 +10,7 @@
     "~/Documents",
     "~/Downloads"
   ],
+  "bankAliases": {},
   "sessionRecall": {
     "query": "Durable decisions, conventions, gotchas and open work for the {bank} project",
     "globalQuery": "Durable cross-project facts, preferences, account mappings and infrastructure gotchas",
@@ -25,6 +26,21 @@
     "refreshTimeoutMs": 60000,
     "coldTimeoutMs": 1500,
     "revalidateAfterMs": 300000
+  },
+  "promptRecall": {
+    "_comment": "Raw relevance recall on substantive Claude/Codex prompts. Calls the project and global banks in parallel; it never reflects, seeds, or searches transcripts.",
+    "budget": "low",
+    "maxTokens": 450,
+    "globalMaxTokens": 200,
+    "maxPromptChars": 800,
+    "maxChars": 3000,
+    "timeoutMs": 2000,
+    "types": [
+      "world",
+      "experience",
+      "observation"
+    ],
+    "preferObservations": true
   },
   "search": {
     "budget": "mid",
@@ -49,15 +65,14 @@
       "resolveWorktrees": true,
       "retainSessions": true,
       "observationScopes": "shared",
-      "autoReflect": true,
+      "autoReflect": false,
       "reflectBudget": "mid",
-      "autoSeed": true,
+      "autoSeed": false,
       "gitIngest": "message",
       "seedLimit": 100,
       "codebaseSurvey": false,
       "surveyRefreshCommits": 0,
-      "pageTriggerType": "cron",
-      "pageTriggerCron": "H H * * *",
+      "pageTriggerType": "manual",
       "manageBankConfig": false,
       "autoUpdate": false,
       "logLevel": "warn",
@@ -69,11 +84,12 @@
     }
   },
   "bankSetup": {
-    "_comment": "Applied by bin/hindsight-banks.mjs as knowledge pages (searchable knowledge-base nodes) and directives. List the global bank plus one bank per repository (its directory name). Pages refresh daily on a per-bank staggered cron from observations; delta pages are cleared and rebuilt every clearEveryHours to shed drift. Directives are bank-global.",
+    "_comment": "Applied by bin/hindsight-banks.mjs as knowledge pages (searchable knowledge-base nodes) and directives. List the global bank plus one bank per repository (its directory name). Pages refresh only when bin/hindsight-banks.mjs is run; set autoMaintain to true to let session start keep them fresh. Delta pages are cleared and rebuilt every clearEveryHours to shed drift. Directives are bank-global.",
     "banks": [
       "global"
     ],
     "pageMaxTokens": 2048,
+    "autoMaintain": false,
     "clearEveryHours": 48,
     "pages": [
       {

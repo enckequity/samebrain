@@ -42,7 +42,7 @@ import { homedir } from 'node:os';
 import { basename, dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  bankPath, hindsightRequest, loadHindsight, loadSettings, repoName, scrub,
+  bankPath, claudeMemoryId, claudeProjectName, hindsightRequest, loadHindsight, loadSettings, repoName, scrub,
 } from '../hooks/hindsight.mjs';
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -213,21 +213,26 @@ function markdownDoc(kind, id, file, title, text) {
 function samebrainMemory() {
   const dir = join(SAMEBRAIN_DIR, 'memory');
   const files = [join(dir, 'MEMORY.md'), ...walk(join(dir, 'topics'), (p) => p.endsWith('.md'))].filter(existsSync);
-  return files.map((f) => markdownDoc('samebrain-memory', `samebrain:memory/${relative(dir, f)}`, f,
-    'samebrain shared cross-agent memory', `# ${relative(dir, f)}\n\n${readFileSync(f, 'utf8')}`));
+  // POSIX separators keep document ids identical across machines (Windows relative() uses '\').
+  const rel = (f) => relative(dir, f).replaceAll('\\', '/');
+  return files.map((f) => markdownDoc('samebrain-memory', `samebrain:memory/${rel(f)}`, f,
+    'samebrain shared cross-agent memory', `# ${rel(f)}\n\n${readFileSync(f, 'utf8')}`));
 }
 
-// Claude Code auto-memory for every project. The home project keeps its original document ids;
-// another project's files go to the bank its recorded working directory resolves to.
+// Claude Code auto-memory for every project. The home project (named the way Claude Code names its
+// folders, so C:\Users\x is C--Users-x) goes to the global bank; another project's files go to the bank
+// its recorded working directory resolves to.
 function claudeAutoMemory() {
   const projects = join(HOME, '.claude', 'projects');
-  const homeProject = `-${HOME.slice(1).replaceAll('/', '-')}`;
+  const homeProject = claudeProjectName(HOME);
   const docs = [];
   let names = [];
   try { names = readdirSync(projects); } catch { return docs; }
   for (const name of names) {
     const dir = join(projects, name, 'memory');
-    const files = walk(dir, (p) => p.endsWith('.md'));
+    // MEMORY.md is Claude Code's index of the files beside it: it repeats them and changes with every
+    // new memory, and each replace re-extracts it and requeues consolidation across the bank.
+    const files = walk(dir, (p) => p.endsWith('.md') && relative(dir, p) !== 'MEMORY.md');
     if (!files.length) continue;
     let bank = settings.globalBank;
     if (name !== homeProject) {
@@ -236,7 +241,7 @@ function claudeAutoMemory() {
       bank = (cwd && existsSync(cwd) && repoName(cwd)) || settings.globalBank;
     }
     for (const f of files) {
-      const id = name === homeProject ? `claude-memory:${relative(dir, f)}` : `claude-memory:${name}/${relative(dir, f)}`;
+      const id = claudeMemoryId(HOME, name, relative(dir, f));
       docs.push({ ...markdownDoc('claude-memory', id, f, 'Claude Code auto-memory', readFileSync(f, 'utf8')), bank });
     }
   }

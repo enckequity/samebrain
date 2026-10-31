@@ -5,7 +5,7 @@
 // subagent sessions, user aborts, and errored turns; the blocking question tool is denied.
 // No-op outside autonomous sessions.
 
-import { CONTRACT, MAX, QUESTION_DENIED, QUESTION_TOOLS, enabled, isTerminal, nudge } from "{{REPO}}/hooks/auto-continue-core.mjs"
+import { CONTRACT, MAX, QUESTION_DENIED, QUESTION_TOOLS, enabled, isTerminal, nudge } from "{{REPO_URL}}/hooks/auto-continue-core.mjs"
 
 export default async ({ client }) => {
   if (!enabled()) return {}

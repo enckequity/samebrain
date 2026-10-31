@@ -2,6 +2,7 @@
 // Self-contained test suite — no framework, no deps. Copies the repo to a temp dir,
 // points HOME/USERPROFILE at a fake home, and exercises render + hooks end-to-end.
 //   node test/run.mjs        exit 0 = all pass
+//   node test/run.mjs --hindsight-focused  run the prompt-recall/render rollout contract only
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { createServer } from 'node:http';
 import {
@@ -11,6 +12,7 @@ import {
 import { hostname, tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { hookCommandSource } from '../bin/codex-hook-command.mjs';
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const work = mkdtempSync(join(tmpdir(), 'samebrain-test-'));
@@ -18,10 +20,15 @@ const repo = join(work, 'repo');
 const home = join(work, 'home');
 // Instance data must not leak into the fixture repo: consumers run this suite inside
 // template instances that carry real telemetry and a machine-local rules ack.
-const SKIP = new Set(['.git', 'node_modules', 'backups', 'telemetry', '.cursor-rules-ack', 'dashboard.html']);
+const SKIP = new Set(['.git', 'node_modules', 'backups', 'telemetry', '.cursor-rules-ack', 'dashboard.html', 'secrets.env']);
 cpSync(ROOT, repo, { recursive: true, filter: (src) => !SKIP.has(basename(src)) });
 mkdirSync(home, { recursive: true });
 
+// Stub every ${VAR} global/mcp.json references so no render in this run (including
+// --hindsight-focused) depends on the host's real secrets or its gitignored secrets.env.
+for (const [, name] of readFileSync(join(ROOT, 'global', 'mcp.json'), 'utf8').matchAll(/\$\{([A-Za-z0-9_]+)\}/g)) {
+  process.env[name] = `https://test.invalid/${name}`;
+}
 const env = { ...process.env, HOME: home, USERPROFILE: home };
 const render = (extraEnv = {}) =>
   spawnSync(process.execPath, [join(repo, 'bin', 'render.mjs')], {
@@ -36,6 +43,8 @@ const t = (name, cond) => {
   if (!cond) failures += 1;
 };
 
+const HINDSIGHT_FOCUSED = process.argv.includes('--hindsight-focused');
+if (!HINDSIGHT_FOCUSED) {
 // 1. Fresh render writes every target (Gemini/Copilot/OpenClaw detected via their dirs)
 {
   mkdirSync(at('.gemini'), { recursive: true });
@@ -45,6 +54,7 @@ const t = (name, cond) => {
   writeFileSync(at('.openclaw', 'workspace', 'AGENTS.md'), '# OpenClaw local guidance\n\nKeep this.\n');
   writeFileSync(at('.openclaw', 'openclaw.json'), JSON.stringify({ agents: { defaults: { model: 'keep/model' } } }));
   const r = render();
+  if (r.status !== 0) console.error(r.stderr);
   t('fresh render exits 0', r.status === 0);
   t('writes claude CLAUDE.md', existsSync(at('.claude', 'CLAUDE.md')));
   t('writes codex AGENTS.md', existsSync(at('.codex', 'AGENTS.md')));
@@ -67,6 +77,20 @@ const t = (name, cond) => {
   const ocAgent = read(at('.config', 'opencode', 'agent', 'autonomous.md'));
   t('opencode agent carries the generated marker', ocAgent.includes('edit global/agents/opencode/autonomous.md in the repo, not here'));
   t('opencode agent keeps frontmatter, no unresolved token', ocAgent.startsWith('---\n') && !ocAgent.includes('{{REPO}}'));
+  const claudeHooks = JSON.parse(read(at('.claude', 'settings.json'))).hooks;
+  const codexHooks = JSON.parse(read(at('.codex', 'hooks.json'))).hooks;
+  const cursorHooks = JSON.parse(read(at('.cursor', 'hooks.json'))).hooks;
+  // Normalize separators so path checks hold on Windows, where rendered commands use backslashes.
+  const slash = (command) => hookCommandSource(command).replaceAll('\\', '/');
+  const hookCommands = (entries) => entries.flatMap((entry) => entry.hooks ?? []).map((hook) => hook.command);
+  const invokeHook = (command, payload) => spawnSync(command, { shell: true, input: JSON.stringify(payload), encoding: 'utf8', env });
+  // Secret-prone Bash commands are rewritten and every tool result is scrubbed.
+  const redactEntry = (event) => (claudeHooks[event] ?? []).find((entry) => hookCommands([entry]).some((command) => slash(command).includes('hooks/redact-hook.mjs')));
+  t('Claude gets the secret redaction hooks', redactEntry('PreToolUse')?.matcher === 'Bash' && redactEntry('PostToolUse')?.matcher === 'Bash|PowerShell|WebFetch|mcp__.*');
+  const redactInvocation = invokeHook(hookCommands([redactEntry('PostToolUse')])[0],
+    { hook_event_name: 'PostToolUse', tool_name: 'Bash', tool_response: { stdout: 'postgres://u:s3cretpw@h/db' } });
+  t('Claude redaction hook scrubs tool output', redactInvocation.status === 0
+    && redactInvocation.stdout.includes('updatedToolOutput') && !redactInvocation.stdout.includes('s3cretpw'));
 }
 
 // 1b. opencode plugins (guardrails/notify/telemetry) and the workflow skills render
@@ -101,6 +125,12 @@ const t = (name, cond) => {
   try { await gh['tool.execute.before']({ tool: 'read' }, { args: { command: 'git add .env' } }) }
   catch { nonBash = false }
   t('guardrails ignores non-bash tools', nonBash);
+  const toolOutput = { output: 'DATABASE_URL=postgres://u:s3cretpw@h/db', metadata: { output: 'postgres://u:s3cretpw@h/db' } };
+  await gh['tool.execute.after']({ tool: 'bash' }, toolOutput);
+  t('guardrails redacts secrets in tool output', !JSON.stringify(toolOutput).includes('s3cretpw'));
+  const plainOutput = { output: 'total 8 README.md', metadata: {} };
+  await gh['tool.execute.after']({ tool: 'bash' }, plainOutput);
+  t('guardrails leaves normal tool output unchanged', plainOutput.output === 'total 8 README.md');
 
   const notifyLog = join(work, 'notify.log');
   process.env.OPENCODE_NOTIFY_LOG = notifyLog;
@@ -129,7 +159,7 @@ const t = (name, cond) => {
 // 1c. opencode auto-continue plugin, driven through a fake client
 {
   const pluginPath = at('.config', 'opencode', 'plugins', 'auto-continue.js');
-  t('renders auto-continue plugin', existsSync(pluginPath) && !read(pluginPath).includes('{{REPO}}'));
+  t('renders auto-continue plugin', existsSync(pluginPath) && !read(pluginPath).includes('{{REPO'));
   const { default: autoContinue } = await import(pathToFileURL(pluginPath).href);
   const sent = [];
   let reply = 'Should I keep going?';
@@ -244,7 +274,7 @@ const t = (name, cond) => {
   const after = JSON.parse(read(at('.codex', 'hooks.json')));
   const cmds = after.hooks.SessionStart.flatMap((e) => e.hooks ?? []).map((h) => h.command);
   t('pre-existing hook preserved', cmds.includes('echo preexisting'));
-  t('managed hook not duplicated', cmds.filter((c) => c.includes('recall.mjs')).length === 1);
+  t('managed hook not duplicated', cmds.filter((c) => hookCommandSource(c).includes('recall.mjs')).length === 1);
 }
 
 // 7. recall.mjs emits the index (git-less repo copy = offline path)
@@ -474,17 +504,20 @@ const t = (name, cond) => {
 {
   const box = join(work, 'sync-git');
   mkdirSync(join(box, 'hooks'), { recursive: true });
-  cpSync(join(repo, 'hooks', 'sync.mjs'), join(box, 'hooks', 'sync.mjs'));
+  for (const f of ['sync.mjs', 'git-sync.mjs']) cpSync(join(repo, 'hooks', f), join(box, 'hooks', f));
   mkdirSync(join(box, 'coordination', 'leases'), { recursive: true });
   const g = (...args) => execFileSync('git', args, { cwd: box, stdio: ['ignore', 'pipe', 'pipe'] }).toString().trim();
-  g('init'); g('config', 'user.email', 't@t'); g('config', 'user.name', 't');
+  const remote = join(work, 'sync-remote.git');
+  execFileSync('git', ['init', '--bare', '--quiet', remote]);
+  g('init', '-b', 'main'); g('config', 'user.email', 't@t'); g('config', 'user.name', 't');
   g('add', '-A'); g('commit', '-m', 'init', '--quiet');
+  g('remote', 'add', 'origin', remote); g('push', '--quiet', '-u', 'origin', 'main');
   writeFileSync(join(box, 'coordination', 'leases', 'claim.lease'),
     JSON.stringify({ owner: 'claude@boxa', expires: '2099-01-01T00:00:00Z' }));
   const r = spawnSync(process.execPath, [join(box, 'hooks', 'sync.mjs'), '--agent', 'claude'], {
     env, input: '{}', encoding: 'utf8',
   });
-  t('sync exits 0 in a git repo with no remote', r.status === 0);
+  t('sync exits 0 against its upstream', r.status === 0);
   t('sync commits the new lease', g('ls-files', 'coordination/leases').includes('claim.lease'));
   t('sync records a session commit', g('log', '--oneline').includes('session update'));
   t('sync leaves no uncommitted lease', g('status', '--porcelain', 'coordination') === '');
@@ -544,6 +577,23 @@ const t = (name, cond) => {
   rmSync(ld, { recursive: true });
 }
 
+// 17c. A linked worktree (.git is a file) never rewrites global config to its own path 
+{
+  const claudeMd = at('.claude', 'CLAUDE.md');
+  writeFileSync(claudeMd, 'sentinel\n');
+  writeFileSync(join(repo, '.git'), 'gitdir: /elsewhere/.git/worktrees/task\n');
+  const skipped = render({ SB_FILE_TOKEN: 'x' });
+  t('worktree render exits cleanly', skipped.status === 0);
+  t('worktree render says it skipped', skipped.stderr.includes('linked worktree'));
+  t('worktree render leaves global files alone', read(claudeMd) === 'sentinel\n');
+  const forced = spawnSync(process.execPath, [join(repo, 'bin', 'render.mjs'), '--from-worktree'], {
+    env: { ...env, SB_FILE_TOKEN: 'x' }, encoding: 'utf8',
+  });
+  t('--from-worktree overrides the guard', forced.status === 0 && read(claudeMd) !== 'sentinel\n');
+  rmSync(join(repo, '.git'));
+  render({ SB_FILE_TOKEN: 'x' });
+}
+
 // 18. Codex MCP opt-in: targets ["codex"] merges into ~/.codex/config.toml, section-level
 {
   writeFileSync(join(repo, 'global', 'mcp.json'), JSON.stringify({
@@ -562,9 +612,16 @@ const t = (name, cond) => {
   t('unmanaged sections preserved', toml.includes('[model]') && toml.includes('name = "gpt-5"') && toml.includes('[mcp_servers.other]'));
   const r2 = render({ SB_FILE_TOKEN: 'tok123' });
   t('codex toml merge idempotent', !r2.stdout.includes('config.toml'));
-  const r3 = render({ SB_FILE_TOKEN: 'tok456' });
+  render({ SB_FILE_TOKEN: 'tok456' });
   t('changed secret updates managed section in place', read(at('.codex', 'config.toml')).includes('KEY = "tok456"')
     && !read(at('.codex', 'config.toml')).includes('tok123'));
+  writeFileSync(at('.codex', 'config.toml'),
+    '[model]\nname = "gpt-5"\n\n  [mcp_servers.mytool]\n  command = "old"\n  [mcp_servers.mytool.env]\n  KEY = "stale"\n\n  [mcp_servers.other]\n  command = "keep-me"\n');
+  render({ SB_FILE_TOKEN: 'tok123' });
+  const indented = read(at('.codex', 'config.toml'));
+  t('indented managed section and its subtable are replaced, not duplicated',
+    indented.match(/\[mcp_servers\.mytool\]/g)?.length === 1 && !indented.includes('"old"') && !indented.includes('stale')
+    && indented.includes('KEY = "tok123"') && indented.includes('command = "keep-me"'));
 }
 
 // 18b. retiredMcpServers are deleted from ~/.claude.json; unmanaged servers survive
@@ -605,8 +662,8 @@ const t = (name, cond) => {
   render({ SB_FILE_TOKEN: 'x' });
   const cmds = JSON.parse(read(at('.codex', 'hooks.json'))).hooks.Stop.flatMap((e) => e.hooks ?? []).map((h) => h.command);
   t('stale managed command replaced', !cmds.includes(oldCmd));
-  t('upgraded command present once', cmds.filter((c) => c.includes('sync.mjs')).length === 1);
-  t('upgraded command carries agent flag', cmds.some((c) => c.includes('--agent codex')));
+  t('upgraded command present once', cmds.filter((c) => hookCommandSource(c).includes('sync.mjs')).length === 1);
+  t('upgraded command carries agent flag', cmds.some((c) => hookCommandSource(c).includes('--agent codex')));
   t('user hook untouched by upgrade', cmds.includes('echo mine'));
 }
 
@@ -791,7 +848,7 @@ const t = (name, cond) => {
   t('opencode gets the memory plugin', existsSync(ocPlugin));
   t('opencode plugin is marker-stamped', read(ocPlugin).includes('rendered by samebrain'));
   t('opencode plugin spawns a real node binary, never its own executable', !read(ocPlugin).includes('{{NODE}}')
-    && /const NODE = process\.env\.SAMEBRAIN_NODE \?\? "\/[^"]+"/.test(read(ocPlugin)) && !/\(process\.execPath,/.test(read(ocPlugin)));
+    && /const NODE = process\.env\.SAMEBRAIN_NODE \?\? "(?:[A-Za-z]:)?\/[^"]+"/.test(read(ocPlugin)) && !/\(process\.execPath,/.test(read(ocPlugin)));
   t('opencode plugin resolves {{REPO}} to the repo', !read(ocPlugin).includes('{{REPO}}')
     && read(ocPlugin).includes(repo.replaceAll('\\', '/')));
   const ocPkg = JSON.parse(read(join(home4, '.config', 'opencode', 'package.json')));
@@ -803,8 +860,8 @@ const t = (name, cond) => {
   render({ SB_FILE_TOKEN: 'x' });
   const codexCmds = JSON.parse(read(at('.codex', 'hooks.json')));
   const codexAll = Object.values(codexCmds.hooks).flat().flatMap((e) => e.hooks ?? []).map((h) => h.command);
-  t('codex gets smartloop liveness hooks', codexAll.some((c) => c.includes('smartloop-sweep.mjs'))
-    && codexAll.some((c) => c.includes('smartloop-stop.mjs')));
+  t('codex gets smartloop liveness hooks', codexAll.some((c) => hookCommandSource(c).includes('smartloop-sweep.mjs'))
+    && codexAll.some((c) => hookCommandSource(c).includes('smartloop-stop.mjs')));
   const cursorCmds = JSON.parse(read(at('.cursor', 'hooks.json')));
   const cursorAll = Object.values(cursorCmds.hooks).flat().map((h) => h.command);
   t('cursor gets smartloop liveness hooks', cursorAll.some((c) => c.includes('smartloop-sweep.mjs') && c.includes('--cursor'))
@@ -936,7 +993,7 @@ const t = (name, cond) => {
   // Opt-in skill target
   mkdirSync(join(repo, 'skills', 'kimiskill'), { recursive: true });
   writeFileSync(join(repo, 'skills', 'kimiskill', 'SKILL.md'), '---\nname: kimiskill\ndescription: x\ntargets: kimi\n---\nbody\n');
-  const r3 = spawnSync(process.execPath, [join(repo, 'bin', 'render.mjs')], {
+  spawnSync(process.execPath, [join(repo, 'bin', 'render.mjs')], {
     env: { ...process.env, HOME: home6, USERPROFILE: home6, SB_FILE_TOKEN: 'x' }, encoding: 'utf8',
   });
   t('kimi-target skill renders to ~/.agents/skills', existsSync(join(home6, '.agents', 'skills', 'kimiskill', 'SKILL.md')));
@@ -1075,6 +1132,7 @@ const t = (name, cond) => {
     recoveredPublish.status === 0 && !existsSync(failureLegacy)
       && read(join(failureSharedDir, 'references', 'guide.md')) === 'required resource\n');
 }
+}
 
 // 37. Hindsight (opt-in): fake server, gated render, recall/search/backfill against it
 {
@@ -1174,7 +1232,7 @@ const t = (name, cond) => {
   mkdirSync(join(hsHome, '.config', 'opencode'), { recursive: true });
   const hsEnv = (extra = {}) => ({ ...process.env, HOME: hsHome, USERPROFILE: hsHome, SB_FILE_TOKEN: 'x', SAMEBRAIN_HINDSIGHT_MAINTAIN: '0', ...extra });
   const keys = { HINDSIGHT_API_URL: url, HINDSIGHT_API_KEY: 'test-dev-key' };
-  const renderHs = (extra) => spawnSync(process.execPath, [join(repo, 'bin', 'render.mjs')], { env: hsEnv(extra), encoding: 'utf8' });
+  const renderHs = (extra, args = []) => spawnSync(process.execPath, [join(repo, 'bin', 'render.mjs'), ...args], { env: hsEnv(extra), encoding: 'utf8' });
   const hsDir = join(hsHome, '.hindsight');
   const settingsFile = join(hsHome, '.claude', 'settings.json');
 
@@ -1228,34 +1286,140 @@ const t = (name, cond) => {
   for (const f of ['claude-stop-hook.js', 'claude-sessionstart-hook.js', 'claude-hook.js', 'codex-stop-hook.js', 'cursor-stop-hook.js',
     'cursor-sessionstart-hook.js', 'cursor-hook.js', 'mcp-server.js']) writeFileSync(join(runtime, 'dist', f), '');
   writeFileSync(join(hsHome, '.codex', 'config.toml'), 'model = "keep"\n\n[features]\njs_repl = false\nmemories = true\nchronicle = true\n\n[memories]\nkeep = 1\n');
-  const wired = renderHs(keys);
+  // Pin a non-Windows render so the Windows-only daemon_auto_start edit stays out of these checks.
+  const posix = { ...keys, SAMEBRAIN_RENDER_PLATFORM: 'linux' };
+  const wired = renderHs(posix);
   const codexToml = read(join(hsHome, '.codex', 'config.toml'));
   t('hindsight: codex native memories switched off, rest of config.toml kept', /\[features\]\njs_repl = false\nmemories = false\nchronicle = true/.test(codexToml)
     && codexToml.includes('model = "keep"') && codexToml.includes('[memories]\nkeep = 1'));
+  writeFileSync(join(hsHome, '.codex', 'config.toml'), 'model = "keep"\n\n[features]\n  js_repl = false\n  memories = true\n  chronicle = true\n');
+  renderHs(posix);
+  const indented = read(join(hsHome, '.codex', 'config.toml'));
+  t('hindsight: indented codex features.memories is flipped in place, never duplicated', (indented.match(/memories\s*=/g) || []).length === 1
+    && indented.includes('  memories = false'));
+  renderHs(posix);
+  t('codex: daemon_auto_start left alone off Windows', !read(join(hsHome, '.codex', 'config.toml')).includes('daemon_auto_start'));
+  renderHs({ ...keys, SAMEBRAIN_RENDER_PLATFORM: 'win32' });
+  renderHs({ ...keys, SAMEBRAIN_RENDER_PLATFORM: 'win32' });
+  const winToml = read(join(hsHome, '.codex', 'config.toml'));
+  t('codex: Windows turns daemon_auto_start off once, memories still off', (winToml.match(/daemon_auto_start\s*=/g) || []).length === 1
+    && winToml.includes('daemon_auto_start = false') && winToml.includes('  memories = false'));
   const claudeStop = JSON.parse(read(settingsFile)).hooks.Stop.flatMap((e) => e.hooks).find((h) => h.command.includes('claude-stop-hook.js'));
-  const codexStop = JSON.parse(read(join(hsHome, '.codex', 'hooks.json'))).hooks.Stop.flatMap((e) => e.hooks).find((h) => h.command.includes('codex-stop-hook.js'));
+  const codexStop = JSON.parse(read(join(hsHome, '.codex', 'hooks.json'))).hooks.Stop.flatMap((e) => e.hooks).find((h) => hookCommandSource(h.command).includes('codex-stop-hook.js'));
   const cursorStop = JSON.parse(read(join(hsHome, '.cursor', 'hooks.json'))).hooks.stop.find((h) => h.command.includes('cursor-stop-hook.js'));
   t('hindsight: runtime staged → render exits 0', wired.status === 0);
   t('hindsight: claude capture hook is synchronous (headless runs drop async hooks)', claudeStop && !claudeStop.async && claudeStop.timeout === 60);
   t('hindsight: codex capture hook wired', codexStop?.timeout === 60);
+  const claudeEnd = JSON.parse(read(settingsFile)).hooks.SessionEnd.flatMap((e) => e.hooks).filter((h) => h.command.includes('claude-stop-hook.js'));
+  t('hindsight: claude and codex capture run through the batching wrapper', claudeStop?.command.includes('hindsight-retain-batch.mjs')
+    && hookCommandSource(codexStop?.command).includes('hindsight-retain-batch.mjs')
+    && JSON.parse(read(settingsFile)).hooks.Stop.flatMap((e) => e.hooks).filter((h) => h.command.includes('claude-stop-hook.js')).length === 1);
+  t('hindsight: claude session end flushes pending turns once', claudeEnd.length === 1 && claudeEnd[0].command.includes('--flush') && claudeEnd[0].timeout === 60);
+  t('hindsight: claude session start sweeps idle pending captures', JSON.parse(read(settingsFile)).hooks.SessionStart.flatMap((e) => e.hooks)
+    .filter((h) => h.command.includes('hindsight-retain-batch.mjs') && h.command.includes('--sweep')).length === 1);
   t('hindsight: cursor capture hook wired', cursorStop?.timeout === 30);
   const cursorHooks = JSON.parse(read(join(hsHome, '.cursor', 'hooks.json'))).hooks;
   t('hindsight: cursor gets session-start seeding and per-prompt injection', cursorHooks.sessionStart.some((h) => h.command.includes('cursor-sessionstart-hook.js'))
     && cursorHooks.beforeSubmitPrompt.some((h) => h.command.includes('cursor-hook.js')));
-  t('hindsight: claude session start seeds through the runtime', JSON.parse(read(settingsFile)).hooks.SessionStart.flatMap((e) => e.hooks)
+  t('hindsight: claude session start loads the runtime roster', JSON.parse(read(settingsFile)).hooks.SessionStart.flatMap((e) => e.hooks)
     .some((h) => h.command.includes('claude-sessionstart-hook.js')));
-  t('hindsight: claude prompts go through the runtime hook', JSON.parse(read(settingsFile)).hooks.UserPromptSubmit.flatMap((e) => e.hooks)
-    .some((h) => h.command.includes('claude-hook.js') && h.timeout === 30));
+  t('hindsight: no-op runtime prompt hook is not installed for claude', !JSON.parse(read(settingsFile)).hooks.UserPromptSubmit.flatMap((e) => e.hooks)
+    .some((h) => h.command.includes('claude-hook.js')));
+  const claudePromptRecall = JSON.parse(read(settingsFile)).hooks.UserPromptSubmit.flatMap((e) => e.hooks)
+    .find((h) => h.command.includes('hindsight-prompt.mjs'));
+  const codexPromptRecall = JSON.parse(read(join(hsHome, '.codex', 'hooks.json'))).hooks.UserPromptSubmit.flatMap((e) => e.hooks)
+    .find((h) => hookCommandSource(h.command).includes('hindsight-prompt.mjs'));
+  t('hindsight: Claude and Codex recall relevant facts on every substantive prompt', claudePromptRecall?.timeout === 10
+    && codexPromptRecall?.timeout === (process.platform === 'win32' ? 10 : 5) && hookCommandSource(codexPromptRecall.command).includes('--agent codex'));
   const mcpFor = (file) => JSON.parse(read(file)).mcpServers?.hindsight;
   t('hindsight: claude and cursor get the runtime MCP server', mcpFor(join(hsHome, '.claude.json'))?.env?.HINDSIGHT_MCP_HARNESS === 'claude-code'
     && mcpFor(join(hsHome, '.cursor', 'mcp.json'))?.args?.[0]?.endsWith('mcp-server.js'));
+  t('hindsight: Codex gets the runtime MCP server', codexToml.includes('[mcp_servers.hindsight]')
+    && codexToml.includes('HINDSIGHT_MCP_HARNESS = "codex"'));
   const caLive = JSON.parse(read(join(hsDir, 'coding-agent.json')));
-  t('hindsight: survey off, pages daily, reflect once per session', caLive.codebaseSurvey === false && caLive.pageTriggerCron === 'H H * * *'
-    && caLive.autoReflect === true && caLive.reflectBudget === 'mid' && caLive.harnesses.opencode.retainSessions === false);
+  const canonicalHs = JSON.parse(read(join(repo, 'global', 'hindsight.json')));
+  t('hindsight: survey off, page refresh manual, no automatic reflect', caLive.codebaseSurvey === false && caLive.pageTriggerType === 'manual'
+    && caLive.pageTriggerCron === undefined
+    && canonicalHs.bankSetup.autoMaintain === false
+    && caLive.autoReflect === false && caLive.autoSeed === false
+    && caLive.reflectBudget === 'mid' && caLive.harnesses.opencode.retainSessions === false);
+  t('hindsight: instructions point to mid-task lookup', read(join(hsHome, '.codex', 'AGENTS.md')).includes('memory-search.mjs')
+    && read(join(hsHome, '.codex', 'AGENTS.md')).includes('could change what you do'));
   t('hindsight: samebrain session hooks survive', read(settingsFile).includes('sync.mjs') && read(settingsFile).includes('recall.mjs'));
   t('hindsight: opencode loads the runtime plugin', JSON.parse(read(join(hsHome, '.config', 'opencode', 'opencode.json'))).plugin.includes(runtime));
+
+  // Codex trust keys include each hook's outer array index. Retarget a managed hook as an
+  // activation does when the samebrain checkout moves, and prove unrelated hooks stay put.
+  const codexHooksFile = join(hsHome, '.codex', 'hooks.json');
+  const beforeRetarget = JSON.parse(read(codexHooksFile));
+  const promptHooks = beforeRetarget.hooks.UserPromptSubmit;
+  const managedIndex = promptHooks.findIndex((entry) => entry.hooks?.some((hook) => hookCommandSource(hook.command).includes('hindsight-prompt.mjs')));
+  promptHooks[managedIndex].hooks[0].command = '"C:\\old\\samebrain\\hooks\\hindsight-prompt.mjs" --agent codex';
+  promptHooks.push({ hooks: [{ type: 'command', command: 'trusted-smartloop-sentinel' }] });
+  const trustedIndex = promptHooks.length - 1;
+  writeFileSync(codexHooksFile, `${JSON.stringify(beforeRetarget, null, 2)}\n`);
+  const retarget = renderHs(keys, ['--memory-only']);
+  const afterRetarget = JSON.parse(read(codexHooksFile)).hooks.UserPromptSubmit;
+  t('hindsight: retargeting managed hooks preserves unrelated Codex trust indices', retarget.status === 0
+    && afterRetarget[managedIndex].hooks.some((hook) => hookCommandSource(hook.command).includes(join(repo, 'hooks', 'hindsight-prompt.mjs')))
+    && afterRetarget[trustedIndex].hooks.some((hook) => hook.command === 'trusted-smartloop-sentinel'));
   const again = renderHs(keys);
+  if (again.status !== 0 || again.stdout.includes('wrote:')) console.error(`hindsight idempotence output:\n${again.stdout}${again.stderr}`);
   t('hindsight: wired render is idempotent', again.status === 0 && !again.stdout.includes('wrote:'));
+
+  // Prompt-time recall: direct ranked recall, with bounded/redacted query and useful tool guidance.
+  const promptProj = join(work, 'prompt-app');
+  mkdirSync(promptProj, { recursive: true });
+  execFileSync('git', ['init', '-q', promptProj]);
+  calls.length = 0;
+  const promptSecret = `sk-ant-${'z'.repeat(30)}`;
+  const promptRecall = await runAsync(join(repo, 'hooks', 'hindsight-prompt.mjs'), ['--agent', 'codex'], {
+    env: hsEnv(keys), cwd: promptProj,
+    input: JSON.stringify({ cwd: promptProj, session_id: 'prompt-1', prompt: `Trace the recurring deployment failure; credential ${promptSecret}` }),
+  });
+  let promptContext = '';
+  try { promptContext = JSON.parse(promptRecall.stdout).hookSpecificOutput.additionalContext; } catch { /* asserted below */ }
+  t('hindsight: prompt recall injects ranked project and global facts', promptRecall.status === 0
+    && promptContext.includes('<hindsight_memories source="prompt-recall"')
+    && promptContext.includes('remembered fact for prompt-app') && promptContext.includes('remembered fact for global'));
+  t('hindsight: prompt recall tells agents how to search deeper mid-task', promptContext.includes('memory-search.mjs'));
+  t('hindsight: prompt recall redacts before network and stays bounded', !JSON.stringify(calls).includes(promptSecret)
+    && calls.filter((c) => c.url.endsWith('/memories/recall')).every((c) => c.body.max_tokens <= 450)
+    && promptContext.length <= canonicalHs.promptRecall.maxChars);
+  calls.length = 0;
+  const trivial = await runAsync(join(repo, 'hooks', 'hindsight-prompt.mjs'), ['--agent', 'claude'], {
+    env: hsEnv(keys), input: JSON.stringify({ cwd: promptProj, prompt: 'thanks' }),
+  });
+  t('hindsight: trivial prompts do not spend a recall', trivial.stdout === '' && calls.length === 0);
+
+  // A scoped rollout updates memory surfaces while preserving unrelated live configuration.
+  const preGuide = read(join(hsHome, '.codex', 'AGENTS.md'));
+  const guideStart = preGuide.indexOf('<!-- samebrain:hindsight:start -->');
+  const guideEnd = preGuide.indexOf('<!-- samebrain:hindsight:end -->');
+  const withoutGuide = `${preGuide.slice(0, guideStart).trimEnd()}${preGuide.slice(guideEnd + '<!-- samebrain:hindsight:end -->'.length)}\n\nLOCAL WINDOWS NOTE\n`;
+  writeFileSync(join(hsHome, '.codex', 'AGENTS.md'), withoutGuide);
+  mkdirSync(join(repo, 'skills', 'memory-only-sentinel'), { recursive: true });
+  writeFileSync(join(repo, 'skills', 'memory-only-sentinel', 'SKILL.md'), '---\nname: memory-only-sentinel\ndescription: x\n---\nfull render only\n');
+  const memoryOnly = renderHs(keys, ['--memory-only']);
+  t('hindsight: memory-only render succeeds and preserves unrelated instructions', memoryOnly.status === 0
+    && read(join(hsHome, '.codex', 'AGENTS.md')).includes('LOCAL WINDOWS NOTE')
+    && read(join(hsHome, '.codex', 'AGENTS.md')).includes('<!-- samebrain:hindsight:start -->'));
+  t('hindsight: memory-only render skips unrelated skills', !existsSync(join(hsHome, '.codex', 'prompts', 'memory-only-sentinel.md')));
+  t('hindsight: memory-only mode persists for session-start updates', read(join(hsDir, 'samebrain-render-mode')).trim() === 'memory-only');
+  const persisted = renderHs(keys);
+  t('hindsight: ordinary auto-render respects persisted memory-only mode', persisted.status === 0
+    && !existsSync(join(hsHome, '.codex', 'prompts', 'memory-only-sentinel.md')));
+  const fullReset = renderHs(keys, ['--full']);
+  t('hindsight: explicit full render clears scoped mode', fullReset.status === 0
+    && !existsSync(join(hsDir, 'samebrain-render-mode'))
+    && existsSync(join(hsHome, '.codex', 'prompts', 'memory-only-sentinel.md')));
+
+  if (HINDSIGHT_FOCUSED) {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(work, { recursive: true, force: true });
+    console.log(failures ? `\n${failures} failure(s)` : '\nall focused Hindsight tests passed');
+    process.exit(failures ? 1 : 0);
+  }
 
   // recall.mjs: repo bank + global bank, bounded, and silent when the server is gone.
   const proj = join(work, 'hs-project');
@@ -1311,9 +1475,9 @@ const t = (name, cond) => {
   const appPages = banks.get('widgets-app')?.pages ?? [];
   t('hindsight: bank setup creates knowledge pages and directives on every dev bank', bankSetup.status === 0
     && ['global', 'widgets-app'].every((bk) => banks.get(bk)?.pages?.length === 4 && banks.get(bk)?.directives?.length === 2));
-  t('hindsight: pages refresh daily from observations; work in flight rebuilds in full', appPages.every((pg) => JSON.stringify(pg.trigger.fact_types) === '["observation"]'
+  t('hindsight: pages refresh manually from observations; work in flight rebuilds in full', appPages.every((pg) => JSON.stringify(pg.trigger.fact_types) === '["observation"]'
     && pg.trigger.exclude_mental_models && pg.trigger.include_chunks === false && pg.trigger.refresh_after_consolidation === false
-    && /^\d+ \d+ \* \* \*$/.test(pg.trigger.refresh_cron))
+    && pg.trigger.refresh_cron === undefined)
     && appPages.find((pg) => pg.name === 'Current work in flight')?.trigger.mode === 'full'
     && appPages.filter((pg) => pg.trigger.mode === 'delta').length === 3);
   const setupAgain = await runAsync(join(repo, 'bin', 'hindsight-banks.mjs'), ['--check'], { env: hsEnv() });
@@ -1369,8 +1533,11 @@ const t = (name, cond) => {
   const hit = await search(['deploy gotchas', '--cwd', proj]);
   t('hindsight: memory-search exits 0 with repo + global results', hit.status === 0
     && hit.stdout.includes('## bank hs-project') && hit.stdout.includes('## bank global'));
-  const off3 = await search(['anything'], { SAMEBRAIN_HINDSIGHT: '0' });
-  t('hindsight: memory-search exits 3 when disabled', off3.status === 3);
+  mkdirSync(join(repo, 'memory', 'topics'), { recursive: true });
+  writeFileSync(join(repo, 'memory', 'topics', 'search-fixture.md'), '# search fixture\n- deploy fixture: topic fallback line\n');
+  const off3 = await search(['deploy fixture'], { SAMEBRAIN_HINDSIGHT: '0' });
+  t('hindsight: disabled memory-search answers from memory/topics', off3.status === 0 && off3.stdout.includes('## bank topics')
+    && off3.stdout.includes('topic fallback line'));
 
   // backfill: fake HOME with every source; dry run is offline, real run is idempotent.
   const bf = join(work, 'home-backfill');
@@ -1378,9 +1545,13 @@ const t = (name, cond) => {
   mkdirSync(join(sbDir, 'memory', 'topics'), { recursive: true });
   writeFileSync(join(sbDir, 'memory', 'MEMORY.md'), '- index fact\n');
   writeFileSync(join(sbDir, 'memory', 'topics', 'infra.md'), '# infra\nDB is postgres://admin:hunter2@db.internal:5432/app\n');
-  const autoMem = join(bf, '.claude', 'projects', `-${bf.slice(1).replaceAll('/', '-')}`, 'memory');
+  const autoMem = join(bf, '.claude', 'projects', bf.replace(/[^A-Za-z0-9]/g, '-'), 'memory');
   mkdirSync(autoMem, { recursive: true });
   writeFileSync(join(autoMem, 'note.md'), 'auto memory note\n');
+  writeFileSync(join(autoMem, 'MEMORY.md'), '- [Note](note.md) — auto memory note\n');
+  // A home-project transcript records the repository the session ran in. Its memory still belongs to
+  // the global bank. One turn is too short to become a session document itself.
+  writeFileSync(join(dirname(autoMem), 'sess-home.jsonl'), `${JSON.stringify({ type: 'user', cwd: proj, sessionId: 'sess-home', message: { role: 'user', content: 'hi' } })}\n`);
   mkdirSync(join(bf, '.codex', 'memories'), { recursive: true });
   writeFileSync(join(bf, '.codex', 'memories', 'MEMORY.md'), '# Task Group: One\n\nfirst group body text long enough\n\n# Task Group: Two\n\nsecond group body text long enough\n');
   const claudeProj = join(bf, '.claude', 'projects', '-proj');
@@ -1409,6 +1580,8 @@ const t = (name, cond) => {
   t('backfill: dry run prices the run', /estimate: \$\d+\.\d\d/.test(dry.stdout));
   t('backfill: session routed to its repository bank', dry.stdout.includes('hs-project  conversation:sess-claude'));
   t('backfill: deleted worktree attributed via codex git remote', dry.stdout.includes('widgets  conversation:sess-codex'));
+  t('backfill: home auto-memory goes to the global bank even when its transcript ran in a repository', /global {2}claude-memory:\S*note\.md/.test(dry.stdout)
+    && !/hs-project {2}claude-memory:/.test(dry.stdout));
   t('backfill: unknown source fails loud', (await backfill(['--dry-run', '--sources', 'nope'])).status === 1);
 
   tenant.leaky = true;
@@ -1443,6 +1616,9 @@ const t = (name, cond) => {
     && retained.slice(firstCurated).every((i) => i.tags.includes('source:memory-file')));
   t('backfill: memory files replace, every item consolidates into one shared scope', retained.every((i) => i.observation_scopes === 'shared')
     && retained.filter((i) => i.tags.includes('source:memory-file')).every((i) => i.update_mode === 'replace' && i.metadata.path));
+  const claudeMemIds = retained.filter((i) => i.tags.includes('memory:claude-memory')).map((i) => i.document_id);
+  t('backfill: Claude auto-memory files go in, their MEMORY.md index stays out', claudeMemIds.some((id) => id.endsWith('note.md'))
+    && !claudeMemIds.some((id) => id.endsWith('MEMORY.md')) && retained.some((i) => i.document_id === 'samebrain:memory/MEMORY.md'));
   const retainCalls = calls.filter((c) => c.method === 'POST' && c.url.endsWith('/memories') && !c.url.includes('samebrain-canary-'));
   t('backfill: every retain carries a UUID operation id', retainCalls.every((c) => /^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(c.body.operation_id))
     && new Set(retainCalls.map((c) => c.body.operation_id)).size === retainCalls.length);
@@ -1486,11 +1662,12 @@ const t = (name, cond) => {
   const syncStamp = join(hsHome, '.hindsight', 'samebrain-memory-sync.json');
   rmSync(syncStamp, { force: true });
   calls.length = 0;
-  await runAsync(join(repo, 'hooks', 'sync.mjs'), ['--agent', 'claude'], { env: hsEnv(), input: '{}' });
-  for (let i = 0; i < 40 && !calls.some((c) => c.method === 'POST' && c.url.endsWith('/memories')); i += 1) await new Promise((r) => { setTimeout(r, 250); });
+  await runAsync(join(repo, 'hooks', 'sync.mjs'), ['--agent', 'claude'], { env: hsEnv({ SAMEBRAIN_HINDSIGHT_SYNC: '1' }), input: '{}' });
+  // The detached backfill scrubs the fixture's full memory/ first: allow slow hosts up to 60s.
+  for (let i = 0; i < 240 && !calls.some((c) => c.method === 'POST' && c.url.endsWith('/memories')); i += 1) await new Promise((r) => { setTimeout(r, 250); });
   t('sync: session end queues the curated-memory backfill', existsSync(syncStamp) && calls.some((c) => c.method === 'POST' && c.url.endsWith('/memories')));
   const stampedAt = statSync(syncStamp).mtimeMs;
-  await runAsync(join(repo, 'hooks', 'sync.mjs'), ['--agent', 'claude'], { env: hsEnv(), input: '{}' });
+  await runAsync(join(repo, 'hooks', 'sync.mjs'), ['--agent', 'claude'], { env: hsEnv({ SAMEBRAIN_HINDSIGHT_SYNC: '1' }), input: '{}' });
   t('sync: the curated-memory backfill is throttled', statSync(syncStamp).mtimeMs === stampedAt);
   await new Promise((r) => { setTimeout(r, 3000); }); // let the detached backfill finish before the server closes
 
@@ -1500,14 +1677,15 @@ const t = (name, cond) => {
   t('hindsight: offline recall still emits the index, with the last cached recall', offline.status === 0 && offline.stdout.includes('<shared-agent-memory')
     && /## Recalled from hs-project \(cached, recalled \d+m ago\)/.test(offline.stdout) && !offline.stdout.includes('(live)'));
   t('hindsight: offline recall stays under 5s', offline.ms < 5000);
-  const offSearch = await search(['anything', '--cwd', proj]);
-  t('hindsight: memory-search exits 3 when unreachable', offSearch.status === 3);
+  const offSearch = await search(['deploy fixture', '--cwd', proj]);
+  t('hindsight: unreachable memory-search falls back to memory/topics', offSearch.status === 0
+    && offSearch.stdout.includes('## bank topics') && offSearch.stderr.includes('Hindsight unavailable'));
   rmSync(join(repo, 'secrets.env'), { force: true });
 }
 
 // 38. Client-side scrub mirrors the server's memory_defense patterns
 {
-  const { scrub } = await import(join(repo, 'hooks', 'hindsight.mjs'));
+  const { scrub } = await import(pathToFileURL(join(repo, 'hooks', 'hindsight.mjs')).href);
   const sample = [
     `anthropic sk-ant-${'x'.repeat(24)}`,
     `github ghp_${'A'.repeat(36)}`,
@@ -1521,16 +1699,50 @@ const t = (name, cond) => {
   t('scrub: jwt, op:// and ssn redacted', out.includes('[REDACTED:jwt]') && out.includes('[REDACTED:op_reference]') && out.includes('[REDACTED:ssn_us]'));
   t('scrub: whole private key block removed', !out.includes('b3BlbnNzaC1rZXk'));
   t('scrub: ordinary prose untouched', scrub('deploy api-main to prod after tests') === 'deploy api-main to prod after tests');
+  // Any scheme://user:password@host is masked; plain URLs and db rules keep working.
+  const urls = scrub([
+    'BRAIN_DATABASE_URL=postgresql://postgres.ref:fixture-pw-1@pooler.example:6543/postgres',
+    'REDIS_URL=redis://default:fixture-pw-2@redis:6379/0',
+    'HOOK=https://svc:fixture-pw-3@api.example/v1',
+    'plain https://example.com/a:b@c and postgres://db.internal/app',
+  ].join('\n'));
+  t('scrub: credential URLs of any scheme redacted', !/fixture-pw-/.test(urls)
+    && urls.includes('[REDACTED:db_url_postgres]') && urls.split('[REDACTED:url_credentials]').length === 3);
+  t('scrub: URLs without userinfo untouched', urls.includes('plain https://example.com/a:b@c and postgres://db.internal/app'));
+  const piped = spawnSync(process.execPath, [join(repo, 'bin', 'redact.mjs')], { input: 'A=amqp://u:fixture-pw-4@mq:5672/\n', encoding: 'utf8' });
+  t('redact CLI: pod output piped through scrub', piped.status === 0 && piped.stdout === 'A=[REDACTED:url_credentials]\n');
+}
+
+// 40. Claude Code project folder names and auto-memory ids on Mac and Windows homes
+{
+  const { claudeMemoryId, claudeProjectName } = await import(pathToFileURL(join(repo, 'hooks', 'hindsight.mjs')).href);
+  t('claude project name: Windows and POSIX homes named as Claude Code names them', claudeProjectName('C:\\Users\\alex') === 'C--Users-alex'
+    && claudeProjectName('/Users/alex') === '-Users-alex');
+  const macId = claudeMemoryId('/Users/x', claudeProjectName('/Users/x'), 'note.md');
+  const winId = claudeMemoryId('C:\\Users\\x', claudeProjectName('C:\\Users\\x'), 'note.md');
+  t('claude memory id: Mac home keeps unprefixed ids, Windows home keeps its prefix', macId === 'claude-memory:note.md'
+    && winId === 'claude-memory:C--Users-x/note.md');
+  t('claude memory id: other projects stay prefixed', claudeMemoryId('/Users/x', '-proj', 'a.md') === 'claude-memory:-proj/a.md');
 }
 
 // 39. Hook commands use a stable node path, identical no matter which node binary runs render
 {
   const nodeHome = join(work, 'home-node-path');
   mkdirSync(join(nodeHome, '.local', 'bin'), { recursive: true });
-  const altNode = join(work, 'alt-node-bin', 'node');
+  const altNode = join(work, 'alt-node', 'bin', process.platform === 'win32' ? 'node.exe' : 'node');
   mkdirSync(dirname(altNode), { recursive: true });
   copyFileSync(process.execPath, altNode, fsConstants.COPYFILE_FICLONE);
   chmodSync(altNode, 0o755);
+  // Homebrew Node 26+ links libnode dynamically relative to ../lib; copy that runtime beside
+  // the throwaway binary so this path-stability test works for static and dynamic Node builds.
+  const nodeLibDir = join(dirname(process.execPath), '..', 'lib');
+  if (existsSync(nodeLibDir)) {
+    const altLibDir = join(dirname(altNode), '..', 'lib');
+    mkdirSync(altLibDir, { recursive: true });
+    for (const file of readdirSync(nodeLibDir).filter((name) => /^libnode.*\.dylib$/.test(name))) {
+      copyFileSync(join(nodeLibDir, file), join(altLibDir, file));
+    }
+  }
   const hookFiles = [['.claude', 'settings.json'], ['.codex', 'hooks.json'], ['.cursor', 'hooks.json']];
   const snapshot = () => hookFiles.map((f) => read(join(nodeHome, ...f))).join('\n---\n');
   const renderWith = (bin) => spawnSync(bin, [join(repo, 'bin', 'render.mjs')], {
@@ -1540,15 +1752,72 @@ const t = (name, cond) => {
   const a = snapshot();
   const second = renderWith(altNode);
   const b = snapshot();
+  if (first.status !== 0 || second.status !== 0 || a !== b) {
+    console.error(first.stderr, second.stderr);
+  }
   t('node path: render under two node binaries writes identical hook files', first.status === 0 && second.status === 0 && a === b);
-  t('node path: the running binary never leaks into hook commands', !b.includes(altNode));
+  // Decoded commands: Windows Codex hooks are base64 PowerShell, and JSON text escapes backslashes.
+  const commandsIn = (file) => Object.values(JSON.parse(read(join(nodeHome, ...file))).hooks ?? {}).flat()
+    .flatMap((entry) => entry.hooks ?? [entry]).map((hook) => hookCommandSource(hook.command ?? ''));
+  t('node path: the running binary never leaks into hook commands', !hookFiles.flatMap(commandsIn).some((c) => c.includes(altNode)));
   t('node path: second render reports no hook changes', !second.stdout.includes('hooks.json') && !second.stdout.includes('settings.json'));
-  symlinkSync(altNode, join(nodeHome, '.local', 'bin', 'node'));
+  const localNode = join(nodeHome, '.local', 'bin', basename(altNode));
+  symlinkSync(altNode, localNode);
   renderWith(process.execPath);
-  t('node path: ~/.local/bin/node is preferred when present', read(join(nodeHome, '.codex', 'hooks.json')).includes(JSON.stringify(`"${join(nodeHome, '.local', 'bin', 'node')}"`).slice(1, -1)));
+  t('node path: ~/.local/bin/node is preferred when present', commandsIn(['.codex', 'hooks.json']).some((c) => c.includes(localNode)));
 }
 
 // 21. Invariants: no services, no LLM APIs anywhere in engine code (Hindsight is an opt-in client)
+// Batched session capture: fewer, larger retains, and no turn is left behind.
+{
+  const home = join(work, 'batch-home');
+  const log = join(work, 'batch-forwarded.jsonl');
+  const upstream = join(work, 'fake-stop-hook.mjs');
+  mkdirSync(home, { recursive: true });
+  writeFileSync(upstream, `import { appendFileSync, readFileSync } from 'node:fs';\nappendFileSync(${JSON.stringify(log)}, readFileSync(0, 'utf8') + '\\n');\n`);
+  const hook = join(repo, 'hooks', 'hindsight-retain-batch.mjs');
+  const env = (extra = {}) => ({ ...process.env, HOME: home, USERPROFILE: home, HINDSIGHT_RETAIN_BATCH_BYTES: '1000', HINDSIGHT_RETAIN_BATCH_MS: '3600000', HINDSIGHT_RETAIN_IDLE_MS: '3600000', ...extra });
+  const transcript = (id) => join(work, `batch-${id}.jsonl`);
+  const grow = (id, bytes) => writeFileSync(transcript(id), 'x'.repeat(bytes), { flag: 'a' });
+  const fire = (id, flags = [], extra) => spawnSync(process.execPath, [hook, '--upstream', upstream, ...flags], {
+    input: JSON.stringify({ session_id: id, transcript_path: transcript(id), cwd: work }), env: env(extra), encoding: 'utf8' });
+  const forwarded = () => (existsSync(log) ? read(log).trim().split('\n').filter(Boolean).map((l) => JSON.parse(l).session_id) : []);
+  grow('a', 10);
+  const first = fire('a');
+  t('batch: first stop of a session retains immediately', first.status === 0 && forwarded().join() === 'a');
+  grow('a', 100); fire('a'); grow('a', 100); fire('a');
+  t('batch: small stops are deferred, not forwarded', forwarded().length === 1);
+  grow('a', 900); fire('a');
+  t('batch: enough new transcript forwards one retain covering the deferred turns', forwarded().length === 2);
+  const waitFor = (cond) => {
+    const deadline = Date.now() + 5000;
+    while (!cond() && Date.now() < deadline) spawnSync(process.execPath, ['-e', 'setTimeout(()=>{},50)']);
+    return cond();
+  };
+  grow('a', 50); fire('a');
+  fire('a', ['--flush']);
+  t('batch: session end flushes the pending tail in the background', waitFor(() => forwarded().length === 3));
+  fire('a', ['--flush']);
+  t('batch: session end with nothing new does not retain again', !waitFor(() => forwarded().length > 3));
+  grow('b', 10); fire('b'); grow('b', 20); fire('b');
+  grow('c', 10); fire('c', [], { HINDSIGHT_RETAIN_IDLE_MS: '0' });
+  t('batch: another session left idle with pending turns is flushed by the sweep', waitFor(() => forwarded().filter((x) => x === 'b').length === 2));
+  grow('e', 10); fire('e'); grow('e', 20); fire('e');
+  spawnSync(process.execPath, [hook, '--sweep'], { env: env({ HINDSIGHT_RETAIN_IDLE_MS: '0' }), encoding: 'utf8' });
+  t('batch: --sweep at session start flushes idle pending sessions', waitFor(() => forwarded().filter((x) => x === 'e').length === 2));
+  const failing = join(work, 'failing-stop-hook.mjs');
+  writeFileSync(failing, `import { appendFileSync, readFileSync } from 'node:fs';\nappendFileSync(${JSON.stringify(log)}, readFileSync(0, 'utf8') + '\\n');\nprocess.exit(1);\n`);
+  const fireWith = (id, up) => spawnSync(process.execPath, [hook, '--upstream', up], {
+    input: JSON.stringify({ session_id: id, transcript_path: transcript(id), cwd: work }), env: env(), encoding: 'utf8' });
+  grow('f', 10); fireWith('f', failing); grow('f', 10); fireWith('f', upstream);
+  t('batch: a failed retain is not recorded, so the next stop retries it', forwarded().filter((x) => x === 'f').length === 2);
+  const off = fire('d', [], { HINDSIGHT_DISABLE_HOOKS: '1' });
+  t('batch: disabled hooks still defer to the runtime, which honors the switch', off.status === 0 && forwarded().includes('d'));
+  const bad = spawnSync(process.execPath, [hook], { input: '{}', env: env(), encoding: 'utf8' });
+  t('batch: missing --upstream is a loud failure', bad.status === 1 && bad.stderr.includes('--upstream'));
+}
+
+
 {
   const forbidden = ['api.openai.com', 'api.anthropic.com', 'convex', 'workos', 'createServer', '.listen('];
   let clean = true;
@@ -1559,6 +1828,21 @@ const t = (name, cond) => {
     }
   }
   t('engine code is service- and LLM-free', clean);
+}
+
+// Focused node:test suites (test/*.test.*, hooks/*.test.mjs) run from the source checkout, so
+// `node test/run.mjs` stays the one command. Each suite reports its own platform skips.
+{
+  const suites = [
+    ...readdirSync(join(ROOT, 'test')).filter((f) => /\.test\.(mjs|cjs)$/.test(f)).map((f) => join(ROOT, 'test', f)),
+    ...readdirSync(join(ROOT, 'hooks')).filter((f) => f.endsWith('.test.mjs')).map((f) => join(ROOT, 'hooks', f)),
+  ].sort();
+  for (const suite of suites) {
+    const r = spawnSync(process.execPath, ['--test', suite], { encoding: 'utf8', timeout: 300000 });
+    if (r.status !== 0) console.error(`${r.stdout}${r.stderr}`);
+    const skipped = Number(/^# skip (\d+)/m.exec(r.stdout)?.[1] ?? 0);
+    t(`node:test ${basename(suite)}${skipped ? ` (${skipped} skipped on ${process.platform})` : ''}`, r.status === 0);
+  }
 }
 
 rmSync(work, { recursive: true, force: true });
