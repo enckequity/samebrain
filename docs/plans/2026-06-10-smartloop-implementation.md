@@ -456,4 +456,4 @@ gh pr create --repo enckequity/samebrain --base main --title "feat: smartloop â€
 
 **Step 3:** Code review (per design: once per changeset, at the integration boundary) â€” dispatch the code-reviewer agent on the branch diff; address CRITICAL/HIGH before merge.
 
-**Step 4:** After merge: in the private consumer repo (`~/agents-sync`), `git pull upstream main && node bin/render.mjs` to activate on this machine; same on the Mac Mini.
+**Step 4:** After merge: in the private consumer repo, `git pull upstream main && node bin/render.mjs` to activate on this machine; same on the Mac Mini.

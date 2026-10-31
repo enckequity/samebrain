@@ -178,7 +178,7 @@ engine. Worktree per item. Parks at queue-empty or limit.
 - **Public core (samebrain):** SKILL.md, both hooks, state-file spec, generic
   review prompt. Fully generic — no consumer-specific accounts, paths, or
   tools. Hard dependencies are Claude Code built-ins only.
-- **Private overlay (consumer repos, e.g. agents-sync):** backlog sources,
+- **Private overlay (consumer repos):** backlog sources,
   repo lists, claim-label conventions, richer reviewer agents.
 - State dir `~/.smartloop/` (overridable), outside any checkout.
 
