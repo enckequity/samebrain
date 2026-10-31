@@ -131,7 +131,11 @@ const STABLE_NODE = stableNode();
 
 // Reconcile plugin cache drift on render/check, including memory-only installs.
 if (process.platform === 'win32') {
-  repairPluginCache({ node: STABLE_NODE, check: CHECK, report: (label) => changes.push(`codex: ${label}`) });
+  try {
+    repairPluginCache({ node: STABLE_NODE, check: CHECK, report: (label) => changes.push(`codex: ${label}`) });
+  } catch (error) {
+    console.error(`render: skipped the Windows plugin hook repair (${error.message}); the rest still renders.`);
+  }
 }
 
 // The pinned coding-agents runtime, once bin/hindsight-activate.mjs staged it: hooks and MCP
@@ -278,7 +282,9 @@ const MEMORY_BOOTSTRAP = `\n\n## Memory bootstrap\n\nAt the start of each sessio
 // opencode has the samebrain plugin (plugins/samebrain-memory.ts): it injects a
 // bounded index automatically and commits/pushes at session end, so its bootstrap
 // points at the retrieval tools instead of asking the model to read the file.
-const PLUGIN_MEMORY_BOOTSTRAP = `\n\n## Memory bootstrap\n\nThe samebrain opencode plugin injects the core index and Hindsight memory into your system context each session. Use \`memory_search\` before assuming context is missing, \`memory_read\` to open an archived topic, and \`memory_retain\` to record a durable fact in Hindsight.`;
+const PLUGIN_MEMORY_BOOTSTRAP = hindsight
+  ? `\n\n## Memory bootstrap\n\nThe samebrain opencode plugin injects the core index and Hindsight memory into your system context each session. Use \`memory_search\` before assuming context is missing, \`memory_read\` to open an archived topic, and \`memory_retain\` to record a durable fact in Hindsight.`
+  : `\n\n## Memory bootstrap\n\nThe samebrain opencode plugin injects the core index into your system context each session. Use \`memory_search\` before assuming context is missing, \`memory_read\` to open a topic, and \`memory_append\` to record a durable fact (one line in the index, detail in memory/topics/).`;
 if (!MEMORY_ONLY) {
 if (existsSync(join(HOME, '.gemini'))) {
   writeIfChanged(

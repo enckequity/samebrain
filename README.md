@@ -110,7 +110,7 @@ Most of these agents don't expose session hooks, so their rendered instructions 
 - `notify.js` — a throttled macOS notification when a session goes idle, errors, or waits on a permission prompt (`OPENCODE_NOTIFY=0`, `OPENCODE_NOTIFY_MIN_MS`).
 - `telemetry.js` — cumulative per-session token and cost snapshots in `telemetry/<machine>/opencode-costs.jsonl` (`SAMEBRAIN_TELEMETRY=0`).
 
-`node bin/render.mjs --check` reports drift without writing anything. `--memory-only` updates just the memory instructions and hooks, leaving MCP, skills, plugins and permissions alone. The first render backs up anything it replaces to `backups/` (gitignored).
+`node bin/render.mjs --check` reports drift without writing anything. `--memory-only` updates the memory instructions and session hooks and skips skills, plugins and your own MCP servers. The Hindsight MCP entry, the redaction hooks and any optional token settings still render. The first render backs up anything it replaces to `backups/` (gitignored).
 
 Hook and MCP commands use one stable node path (`SAMEBRAIN_NODE`, then `~/.local/bin/node`, then the PATH node), so rendering under a different node does not rewrite every hook and reset Codex's per-command hook trust.
 
@@ -119,7 +119,7 @@ Hook and MCP commands use one stable node path (`SAMEBRAIN_NODE`, then `~/.local
 <details>
 <summary><strong>Shared memory: why git instead of a memory server</strong></summary>
 
-Every session of every agent starts with the contents of `memory/MEMORY.md` injected into context (after a fast, fail-silent `git pull`). The instructions rendered into every agent tell it to append durable facts — one line in the index, detail in `memory/topics/*.md`. At session end, a hook commits and pushes. Offline? Both hooks fail silently and reconcile on the next pull.
+Every session of every agent starts with the contents of `memory/MEMORY.md` injected into context (after a short sync that commits memory, fetches and merges). Sync never forces or resets. If the checkout has other uncommitted work or a conflict, it stops and tells the agent instead of merging. The instructions rendered into every agent tell it to append durable facts — one line in the index, detail in `memory/topics/*.md`. At session end, a hook commits and pushes. Offline? Both hooks fail silently and reconcile on the next pull.
 
 Why this beats an MCP memory server:
 
@@ -336,7 +336,7 @@ git remote add upstream https://github.com/enckequity/samebrain.git   # once
 git pull upstream main                                                # whenever
 ```
 
-You edit `global/` and `memory/`; the template mostly evolves `bin/`, `hooks/`, `plugins/`, and docs — so pulls merge cleanly (if you enabled Hindsight, expect the occasional merge in `global/hindsight.json`). Setup already enabled auto-render after every pull (`git config core.hooksPath .githooks`), and the session-start recall hook re-renders whenever the engine revision changed since the last render (rebase pulls — like recall's own — never fire post-merge), so config changes land on every machine at the next session start, no manual step.
+You edit `global/` and `memory/`; the template mostly evolves `bin/`, `hooks/`, `plugins/`, and docs — so pulls merge cleanly (if you enabled Hindsight, expect the occasional merge in `global/hindsight.json`). Setup already enabled auto-render after every pull (`git config core.hooksPath .githooks`), and the session-start recall hook re-renders whenever the engine revision changed since the last render (session sync merges run with repo hooks off, so the post-merge render only fires on your own pulls), so config changes land on every machine at the next session start, no manual step.
 
 Tests live in `test/run.mjs` (no framework, no deps). It also runs the `node:test` files in `test/` and `hooks/`, and they all run on Linux, macOS and Windows. Tests that need a POSIX shell skip on Windows and say why. Run `node test/run.mjs` locally before a PR.
 

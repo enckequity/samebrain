@@ -7,7 +7,10 @@ import {hostname} from 'node:os';
 // Session hooks share this lock; never steal an active or uncertain owner's work.
 export function syncGit(root,{timeout=8000,commitPaths=[],push=false}={}) {
  let step='repository inspection';
- const git=args=>{step=`git ${args[0]}`;return execFileSync('git',args,{cwd:root,timeout,encoding:'utf8',windowsHide:true,env:{...process.env,GIT_TERMINAL_PROMPT:'0'},stdio:['ignore','pipe','pipe']}).trim();};
+ // Repo hooks stay off here: post-merge would render under this timeout, and recall already
+ // re-renders when the engine revision moves. LC_ALL=C keeps conflict output parseable.
+ const noHooks=`core.hooksPath=${join(root,'.git','samebrain-no-hooks')}`;
+ const git=args=>{step=`git ${args[0]}`;return execFileSync('git',['-c',noHooks,...args],{cwd:root,timeout,encoding:'utf8',windowsHide:true,env:{...process.env,GIT_TERMINAL_PROMPT:'0',LC_ALL:'C'},stdio:['ignore','pipe','pipe']}).trim();};
  const blocked=reason=>({status:'blocked',reason});
  let lock,token;
  try {
