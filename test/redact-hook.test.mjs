@@ -42,7 +42,7 @@ test('failing exec and DB-client commands are redacted with exit code kept', () 
   // Stubs reproduce the leak offline. The kubectl stub prints no DB-client words, so only the
   // exec pattern can trigger the wrap.
   const leak = (name) => `${name}() { echo 'invalid connection option "postgres://postgres.ref:s3cretpw@h:6543/postgres"' >&2; return 1; }; `;
-  for (const [name, call] of [['kubectl', 'kubectl -n agent-platform exec -i deploy/brain -- python - < /dev/null'],
+  for (const [name, call] of [['kubectl', 'kubectl -n prod exec -i deploy/app -- python - < /dev/null'],
     ['docker', 'docker exec api python check.py'], ['psql', 'psql -c "select 1"']]) {
     assert.ok(isSecretProne(call), call);
     const run = bash(pre(`${leak(name)}${call}`).hookSpecificOutput.updatedInput.command);
@@ -73,11 +73,11 @@ test('scrub() handles 5 MB of input in under 1 second', () => {
 
 test('secret-prone detection', () => {
   for (const command of ['env', 'printenv', 'sudo env', 'cd x && printenv FOO', 'echo $(env)', 'export -p',
-    'kubectl get secret api -o yaml', 'kubectl exec deploy/api -- env', "kubectl exec pod -- sh -c 'printenv'",
+    'kubectl get secret api -o yaml', 'kubectl exec deploy/app -- env', "kubectl exec pod -- sh -c 'printenv'",
     'docker inspect api', 'op read op://vault/item/field', 'op item get db --reveal', 'cat .env.local',
     'head -5 apps/web/.env', 'cat secrets.env', 'supabase db push --db-url "$DB"', 'gh auth token',
     // A failing psycopg connect inside a container once printed the production DSN.
-    'kubectl -n agent-platform exec -i deploy/brain -- python - < q3.py', 'docker exec api python check.py',
+    'kubectl -n prod exec -i deploy/app -- python - < q3.py', 'docker exec api python check.py',
     'python -c "import psycopg; psycopg.connect(os.environ[\'X\'])"', 'psql "$DSN" -c "select 1"',
     "python -c 'import os; print(os.environ[\"MODEL_CALL_AUDIT_DATABASE_URL\"])'", 'pg_dump "$DATABASE_URL" > x.sql',
     'podman exec db sh', 'node -e "1" && psql -c "select 1"', 'PGPASSWORD=x psql -h h', 'time pg_dump db',
